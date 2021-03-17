@@ -4,7 +4,7 @@ use Mojolicious::Lite;
 use DBI;
 
 #======================#
-# Customizations
+# CONFIG
 #======================#
 my $config = {
 	routes => app->home->rel_file('../routes')->realpath,
@@ -15,7 +15,7 @@ app->renderer->paths([$config->{routes}]);
 app->renderer->cache->max_keys(0);
 
 #======================#
-# Initiations
+# INITIATIONS
 #======================#
 my $dbh = DBI->connect ("dbi:CSV:", undef, undef, {
     f_ext      => ".csv/r",
@@ -23,7 +23,10 @@ my $dbh = DBI->connect ("dbi:CSV:", undef, undef, {
     RaiseError => 1,
     }) or die "Cannot connect: $DBI::errstr";
 	
-
+#======================#
+# ROUTES
+#======================#
+	
 get '/' => sub {
   my ($c, @data) = (shift);
   my $sth = $dbh->prepare ("select * from test");
@@ -49,5 +52,8 @@ get '/missing' => sub {
 # Exception (500)
 get '/dies' => sub { die 'Intentional error' };
 
+#======================#
+# START APP
+#======================#
 
 app->start;

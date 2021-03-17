@@ -1,0 +1,41 @@
+---
+# =============================================
+# Configuration
+# =============================================
+datasource: https://www.bclc.com/DownloadableNumbers/CSV/649.zip
+filename: sixfortynine.csv
+table: sixfortynine.csv
+title: Lotto 649
+---
+# =============================================
+# Mappings (empty mappings if the intent is to clone the same structure)
+# =============================================
+draw: draw_number
+sequence: sequence_number
+draw_date: draw_date
+slot1: number_drawn_1
+slot2: number_drawn_2
+slot3: number_drawn_3
+slot4: number_drawn_4
+slot5: number_drawn_5
+slot6: number_drawn_6
+bonus: bonus_number
+sum:
+    - number_drawn_1
+    - number_drawn_2
+    - number_drawn_3
+    - number_drawn_4
+    - number_drawn_5
+    - number_drawn_6
+---
+# =============================================
+# Create table
+# =============================================
+template: mustache
+sql: CREATE TABLE {{ table }} (draw INTEGER, sequence INTEGER, draw_date VARCHAR, slot1 INTEGER, slot2 INTEGER, slot3 INTEGER, slot4 INTEGER, slot5 INTEGER, slot6 INTEGER, bonus INTEGER, sum INTEGER);
+---
+# =============================================
+# Insert data
+# =============================================
+template: mustache
+sql: INSERT INTO {{ table }} VALUES ( {{ draw }}, {{ sequence }}, '{{ draw_date }}', {{ slot1 }}, {{ slot2 }}, {{ slot3 }}, {{ slot4 }}, {{ slot5 }}, {{ slot6 }}, {{ bonus }}, {{ sum }} );
