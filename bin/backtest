@@ -1,0 +1,158 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use tubular::Extract ();
+use tubular::Sequence ();
+use tubular::Backtest ();
+use JSON::PP ();
+
+sub usage {
+    return <<'USAGE';
+tubular backtest - rolling historical evaluation of forecast methods
+
+Usage:
+  bin/backtest FILE [options]
+  bin/backtest --values "1 2 3" [options]
+
+Options:
+  --values STRING   parse numbers from STRING instead of a file
+  --window N        training window (default 100; 0 = whole history)
+  --min-train N     minimum training length before scoring (default 10)
+  --top N           top-N hit rate measure (default 1)
+  --methods LIST    comma-separated methods (default last,mean,markov1,histogram)
+  --seed N          enable the reproducible random baseline
+  --column C        CSV: header name or 0-based column index
+  --pages RANGE     PDF: pages to read, e.g. 1-3,5
+  --strict 0|1      fail on malformed input (default from config)
+  --csv-header A    header policy: auto|always|never (default from config)
+  --json            emit machine-readable JSON
+  -h, --help        show this help and exit
+
+Training never looks ahead: each prediction is scored against the value that
+really follows the training slice. Errors are MAE/RMSE; hit_rate is the
+fraction of positions whose true value is inside the method's top-N set.
+USAGE
+}
+
+sub usage_bad {
+    my $msg = shift;
+    warn "bin/backtest: $msg\n\n";
+    warn usage();
+    exit 2;
+}
+
+my %opt = (help => 0, json => 0);
+my @files;
+my $i = 0;
+while ($i < @ARGV) {
+    my $arg = $ARGV[$i++];
+    if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
+    elsif ($arg eq '--json') { $opt{json} = 1 }
+    elsif ($arg eq '--values') {
+        defined $ARGV[$i] or usage_bad("--values needs a value");
+        $opt{values} = $ARGV[$i++];
+    }
+    elsif ($arg eq '--window' || $arg eq '--min-train' || $arg eq '--top' || $arg eq '--seed') {
+        defined $ARGV[$i] or usage_bad("$arg needs a value");
+        my $v = $ARGV[$i++];
+        usage_bad("$arg must be a non-negative integer") unless $v =~ /^\d+$/;
+        $opt{$arg =~ s/^--//r} = $v;
+    }
+    elsif ($arg eq '--methods' || $arg eq '--column' || $arg eq '--pages' || $arg eq '--strict' || $arg eq '--csv-header') {
+        defined $ARGV[$i] or usage_bad("$arg needs a value");
+        $opt{$arg =~ s/^--//r} = $ARGV[$i++];
+    }
+    elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
+    else { push @files, $arg }
+}
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+
+if (defined $opt{values} && @files) {
+    usage_bad("give FILE or --values, not both");
+}
+usage_bad("FILE or --values is required") unless defined $opt{values} || @files == 1;
+
+if (defined $opt{top}) {
+    usage_bad("--top must be >= 1") unless $opt{top} >= 1;
+}
+
+my $config = tubular::Config->new();
+my $cfg = $config->as_hash();
+$opt{strict}     = $cfg->{input}{strict}     unless defined $opt{strict};
+$opt{csv_header} = $cfg->{input}{csv_header} unless defined $opt{csv_header};
+$opt{window}     = 100                       unless defined $opt{window};
+$opt{'min-train'} = 10                       unless defined $opt{'min-train'};
+$opt{top}        = 1                         unless defined $opt{top};
+
+my $values;
+my $source;
+if (defined $opt{values}) {
+    my $seq = tubular::Sequence->from_string($opt{values}, strict => $opt{strict});
+    $values = [ $seq->values ];
+    $source = 'values';
+}
+else {
+    my %xopt = map { $_ => $opt{$_} } grep { defined $opt{$_} } qw(column pages strict csv_header);
+    my $res = tubular::Extract->extract($files[0], mode => 'numbers', %xopt);
+    if (!$res->{ok}) {
+        warn "bin/backtest: $res->{error}\n";
+        exit 1;
+    }
+    warn "bin/backtest: warning: $_\n" for @{ $res->{warnings} };
+    $values = $res->{values};
+    $source = $files[0];
+}
+
+my @methods = defined $opt{methods}
+    ? split /,/, $opt{methods}
+    : qw(last mean markov1 histogram);
+for my $m (@methods) {
+    usage_bad("unknown method '$m'") unless grep { $_ eq $m } qw(last mean markov1 histogram random);
+}
+my %seen_m;
+usage_bad("duplicate method in --methods") if grep { $seen_m{$_}++ } @methods;
+
+my $b = tubular::Backtest->evaluate(
+    values        => $values,
+    window        => $opt{window},
+    min_train     => $opt{'min-train'},
+    top           => $opt{top},
+    methods       => \@methods,
+    max_positions => $cfg->{forecast}{backtest_windows},
+    seed          => defined $opt{seed} ? $opt{seed} : undef,
+);
+if (!$b->{ok}) {
+    warn "bin/backtest: $b->{error}\n";
+    exit 1;
+}
+
+$b->{source} = $source;
+
+if ($opt{json}) {
+    print JSON::PP->new->utf8->canonical->pretty->encode($b);
+    exit 0;
+}
+
+printf "source:     %s\n", $source;
+printf "values:     %d   positions scored: %d\n", $b->{n}, $b->{positions};
+printf "window:     %s   min_train: %d   top: %d\n",
+    $b->{window} == 0 ? 'all' : $b->{window}, $b->{min_train}, $b->{top};
+printf "seed:       %s\n", defined $b->{seed} ? $b->{seed} : '(none)';
+
+printf "\n%-12s %10s %10s %8s %9s\n", 'method', 'mae', 'rmse', 'hits', 'hit_rate';
+for my $m (@{ $b->{methods} }) {
+    my $hits = $m->{hits} . '/' . $m->{positions};
+    printf "%-12s %10.4f %10.4f %8s %9.4f\n",
+        $m->{method}, $m->{mae}, $m->{rmse}, $hits,
+        defined $m->{hit_rate} ? $m->{hit_rate} : 0;
+}
+
+exit 0;

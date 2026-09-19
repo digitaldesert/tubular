@@ -1,0 +1,67 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+
+my %COMMANDS = map { $_ => 1 } qw(
+    fetch
+    extract
+    inspect
+    stats
+    forecast
+    backtest
+    models
+    doctor
+);
+
+sub usage {
+    return <<'USAGE';
+tubular - deterministic statistics and native-model forecasting
+
+Usage:
+  bin/tubular COMMAND [ARGS...]
+
+Commands:
+  fetch      fetch a remote resource and save it to disk
+  extract    extract numerical data from a file
+  inspect    inspect a sequence of numbers
+  stats      compute deterministic sequence statistics
+  forecast   forecast future values
+  backtest   backtest forecasting methods
+  models     manage forecasting models
+  doctor     report environment status
+
+Options:
+  -h, --help     show this help and exit
+  --version      show version and exit
+
+Run 'bin/tubular COMMAND --help' for command-specific help.
+USAGE
+}
+
+my $cmd = shift @ARGV;
+
+if (!defined $cmd || $cmd eq 'help' || $cmd eq '-h' || $cmd eq '--help') {
+    print usage();
+    exit 0;
+}
+
+if ($cmd eq 'version' || $cmd eq '--version') {
+    my $cfg = tubular::Config->new();
+    print "tubular " . $cfg->version . " (Perl $])\n";
+    exit 0;
+}
+
+if (!$COMMANDS{$cmd}) {
+    warn "bin/tubular: unknown command '$cmd'\n\n";
+    warn usage();
+    exit 2;
+}
+
+my $script = "$RealBin/$cmd";
+die "bin/tubular: command script not found: $script\n" unless -e $script;
+
+exec { $^X } $^X, $script, @ARGV;

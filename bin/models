@@ -1,0 +1,300 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use tubular::Fetch ();
+use tubular::Adapter::ZSFM ();
+use JSON::PP ();
+use Digest::SHA ();
+use File::Spec ();
+use File::Basename qw(basename);
+use File::Copy qw(copy);
+use Time::Piece ();
+
+sub usage {
+    return <<'USAGE';
+tubular models - explicit model management (no implicit downloads)
+
+Usage:
+  bin/models list [--json]
+  bin/models status [NAME] [--json]
+  bin/models setup NAME --url URL [--dtype DTYPE] [--force] [--json]
+  bin/models setup NAME --file PATH [--dtype DTYPE] [--force] [--json]
+  bin/models path NAME [--json]
+  bin/models --help
+
+Models live in <home>/models. Downloads happen only when you ask for them:
+setup with --url or --file. The default dtype is q8 (config forecast.dtype).
+USAGE
+}
+
+sub usage_bad {
+    my $msg = shift;
+    warn "bin/models: $msg\n\n";
+    warn usage();
+    exit 2;
+}
+
+my ($cmd, @rest);
+my %opt = (json => 0, force => 0);
+
+my $i = 0;
+while ($i < @ARGV) {
+    my $arg = $ARGV[$i++];
+    if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
+    elsif ($arg eq '--json') { $opt{json} = 1 }
+    elsif ($arg eq '--force') { $opt{force} = 1 }
+    elsif ($arg eq '--dtype' || $arg eq '--url' || $arg eq '--file') {
+        defined $ARGV[$i] or usage_bad("$arg needs a value");
+        $opt{$arg =~ s/^--//r} = $ARGV[$i++];
+    }
+    elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
+    else { push @rest, $arg }
+}
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+
+$cmd = shift @rest;
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+usage_bad("a subcommand is required (list, status, setup, path)") unless defined $cmd;
+usage_bad("unknown subcommand '$cmd'") unless grep { $_ eq $cmd } qw(list status setup path);
+
+my $SAFE = qr/^[A-Za-z0-9._-]+$/;
+
+sub models_dir ($config) {
+    my $dir = File::Spec->catdir($config->home, 'models');
+    if (!-d $dir) {
+        mkdir $dir or die "bin/models: cannot create $dir: $!\n";
+    }
+    return $dir;
+}
+
+sub manifest_path ($dir, $name) {
+    return File::Spec->catfile($dir, "$name.json");
+}
+
+sub model_file_path ($dir, $name, $dtype) {
+    return File::Spec->catfile($dir, "$name-$dtype.gguf");
+}
+
+sub read_manifest ($dir, $name) {
+    my $mfile = manifest_path($dir, $name);
+    return undef unless -e $mfile;
+    open my $fh, '<:raw:encoding(UTF-8)', $mfile or return undef;
+    local $/;
+    my $raw = <$fh> // '';
+    close $fh;
+    my $m = eval { JSON::PP::decode_json($raw) };
+    return (ref $m eq 'HASH') ? $m : undef;
+}
+
+sub out ($name, %fields) {
+    my $r = { command => $name, %fields };
+    if ($opt{json}) {
+        print JSON::PP->new->utf8->canonical->pretty->encode($r);
+    }
+    else {
+        print "$r->{message}\n" if defined $r->{message};
+    }
+    exit($r->{ok} ? 0 : 1);
+}
+
+my $config = tubular::Config->new();
+my $cfg = $config->as_hash();
+my $dir = models_dir($config);
+
+if ($cmd eq 'list') {
+    opendir my $dh, $dir or out('list', ok => 0, message => "cannot read $dir: $!");
+    my @names = sort grep { /\.json$/ } readdir $dh;
+    closedir $dh;
+    my @models;
+    for my $n (@names) {
+        (my $name = $n) =~ s/\.json\z//;
+        my $m = read_manifest($dir, $name);
+        $m = { name => $name, dtype => 'unknown' } unless $m;
+        push @models, $m;
+    }
+    if ($opt{json}) {
+        my $res = { ok => 1, models => \@models };
+        print JSON::PP->new->utf8->canonical->pretty->encode($res);
+        exit 0;
+    }
+    if (!@models) {
+        print "no models installed ($dir)\n";
+        exit 0;
+    }
+    printf "%-20s %-8s %10s %-14s\n", 'name', 'dtype', 'bytes', 'sha256';
+    for my $m (@models) {
+        my $file = File::Spec->catfile($dir, $m->{file} // '');
+        my $size = -s $file;
+        printf "%-20s %-8s %10s %-14s\n",
+            $m->{name},
+            $m->{dtype} // '-',
+            (defined $size ? $size : '-'),
+            defined $m->{sha256} ? substr($m->{sha256}, 0, 12) : '-';
+    }
+    exit 0;
+}
+
+if ($cmd eq 'path') {
+    my $name = shift @rest;
+    usage_bad("path requires NAME") unless defined $name;
+    usage_bad("invalid model name '$name'") unless $name =~ $SAFE;
+    my $m = read_manifest($dir, $name);
+    if (!$m) {
+        out('path', ok => 0, message => "model '$name' is not installed (try: bin/models setup $name --file PATH)");
+    }
+    my $file = File::Spec->catfile($dir, $m->{file} // '');
+    if (!-e $file) {
+        out('path', ok => 0, message => "model '$name' manifest exists but file is missing: $file");
+    }
+    out('path', ok => 1, path => $file, message => $file);
+}
+
+if ($cmd eq 'status') {
+    my $name = shift @rest;
+    my $zsfm = tubular::Adapter::ZSFM->new(path => $ENV{TUBULAR_ZSFM});
+    my $zpath = $zsfm->find();
+    my $zver = undef;
+    if (defined $zpath) {
+        my $v = $zsfm->version();
+        $zver = $v->{version} if $v->{ok};
+    }
+    my %info = (
+        ok      => 1,
+        dir     => $dir,
+        zsfm    => defined $zpath ? { path => $zpath, version => $zver } : undef,
+        default_model => $cfg->{forecast}{model},
+        default_dtype => $cfg->{forecast}{dtype},
+    );
+
+    if (defined $name) {
+        usage_bad("invalid model name '$name'") unless $name =~ $SAFE;
+        my $m = read_manifest($dir, $name);
+        if (!$m) {
+            out('status', ok => 0, %info, message => "model '$name' is not installed");
+        }
+        my $file = File::Spec->catfile($dir, $m->{file} // '');
+        $m->{present} = -e $file ? 1 : 0;
+        $m->{size} = defined($m->{present} && $m->{present}) ? (-s $file) : undef;
+        $info{model} = $m;
+        out('status', %info);
+    }
+
+    my @models;
+    opendir my $dh, $dir or out('status', ok => 0, %info, message => "cannot read $dir: $!");
+    my @names = sort grep { /\.json$/ } readdir $dh;
+    closedir $dh;
+    for my $n (@names) {
+        (my $mn = $n) =~ s/\.json\z//;
+        my $m = read_manifest($dir, $mn);
+        next unless $m;
+        my $file = File::Spec->catfile($dir, $m->{file} // '');
+        $m->{present} = -e $file ? 1 : 0;
+        $m->{size} = -s $file;
+        push @models, $m;
+    }
+    $info{models} = \@models;
+
+    if ($opt{json}) {
+        print JSON::PP->new->utf8->canonical->pretty->encode(\%info);
+        exit 0;
+    }
+    printf "run dir:      %s\n", $dir;
+    printf "zsfm:         %s\n", defined $info{zsfm} ? "$info{zsfm}{path} ($info{zsfm}{version})" : 'not found';
+    printf "defaults:     model=%s dtype=%s\n", $info{default_model}, $info{default_dtype};
+    if (!@models) {
+        print "installed:    none\n";
+        exit 0;
+    }
+    print "installed:\n";
+    for my $m (@models) {
+        printf "  %-20s %-8s %10s %s\n",
+            $m->{name}, $m->{dtype} // '-',
+            (defined $m->{size} ? $m->{size} : '-'),
+            ($m->{present} ? 'present' : 'MISSING');
+    }
+    exit 0;
+}
+
+# setup
+{
+    my $name = shift @rest;
+    usage_bad("setup requires NAME") unless defined $name;
+    usage_bad("invalid model name '$name'") unless $name =~ $SAFE;
+    my $dtype = defined $opt{dtype} ? $opt{dtype} : $cfg->{forecast}{dtype};
+    usage_bad("invalid dtype '$dtype'") unless $dtype =~ $SAFE;
+
+    my $url = $opt{url};
+    my $src = $opt{file};
+    usage_bad("setup needs exactly one of --url or --file") if (defined $url) == (defined $src);
+
+    my $file = model_file_path($dir, $name, $dtype);
+    if (-e $file || read_manifest($dir, $name)) {
+        unless ($opt{force}) {
+            out('setup', ok => 0, dtype => $dtype, message => "model '$name' already installed (use --force to replace)");
+        }
+    }
+
+    my ($bytes, $sha256, $source);
+    if (defined $src) {
+        usage_bad("--file source not found: $src") unless -e $src;
+        $source = "file:$src";
+        my $raw = do {
+            open my $fh, '<:raw', $src or out('setup', ok => 0, message => "cannot read $src: $!");
+            local $/;
+            <$fh>;
+        };
+        $bytes = length $raw;
+        $sha256 = Digest::SHA::sha256_hex($raw);
+        eval {
+            open my $fh, '>:raw', $file.'.part' or die "cannot write: $!";
+            print {$fh} $raw or die "write failed: $!";
+            close $fh or die "close failed: $!";
+            rename $file.'.part', $file or die "rename failed: $!";
+        };
+        if ($@) {
+            unlink "$file.part" if -e "$file.part";
+            out('setup', ok => 0, message => "cannot copy model into $file: $@");
+        }
+    }
+    else {
+        my $fetch = tubular::Fetch->new;
+        my $res = $fetch->fetch($url, output => $file, force => 1, config => $cfg, timeout => 60);
+        if (!$res->{ok}) {
+            unlink $file if -e $file;
+            out('setup', ok => 0, message => "download failed: $res->{error}");
+        }
+        $bytes = $res->{bytes};
+        $sha256 = $res->{sha256};
+        $source = $url;
+    }
+
+    my $manifest = {
+        name    => $name,
+        dtype   => $dtype,
+        file    => basename($file),
+        source  => $source,
+        sha256  => $sha256,
+        bytes   => $bytes,
+        created => scalar Time::Piece->new->epoch,
+    };
+    open my $mh, '>:utf8', manifest_path($dir, $name) or out('setup', ok => 0, message => "cannot write manifest: $!");
+    print {$mh} JSON::PP->new->utf8->canonical->pretty->encode($manifest);
+    close $mh;
+
+    out('setup', ok => 1, name => $name, dtype => $dtype, file => $file,
+        sha256 => $sha256, bytes => $bytes, message => "installed $name ($dtype): $file");
+}
+
+###

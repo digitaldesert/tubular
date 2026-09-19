@@ -1,0 +1,24 @@
+{
+  "home": ".tubular",
+
+  "fetch": {
+    "timeout": 30,
+    "max_bytes": 52428800,
+    "user_agent": "tubular/0.1"
+  },
+
+  "input": {
+    "strict": true,
+    "csv_header": "auto"
+  },
+
+  "forecast": {
+    "runner": "zsfm",
+    "model": "timesfm",
+    "dtype": "q8",
+    "horizon": 1,
+    "top": 2,
+    "mode": "auto",
+    "backtest_windows": 1000
+  }
+}

@@ -1,4 +1,9 @@
 !Build/
+
+# tubular runtime data (never commit downloads/models)
+/.tubular/
+*.gguf
+
 .last_cover_stats
 /META.yml
 /META.json

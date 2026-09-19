@@ -1,0 +1,121 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use tubular::Extract ();
+use tubular::Sequence ();
+use tubular::Stats ();
+use JSON::PP ();
+
+sub usage {
+    return <<'USAGE';
+tubular inspect - summary overview of a sequence
+
+Usage:
+  bin/inspect FILE [options]
+  bin/inspect --values "1 2 3" [options]
+
+Options:
+  --values STRING   parse numbers from STRING instead of a file
+  --column C        CSV: header name or 0-based column index
+  --pages RANGE     PDF: pages to read, e.g. 1-3,5
+  --strict 0|1      fail on malformed input (default from config)
+  --csv-header A    header policy: auto|always|never (default from config)
+  --json            emit machine-readable JSON
+  -h, --help        show this help and exit
+USAGE
+}
+
+sub usage_bad {
+    my $msg = shift;
+    warn "bin/inspect: $msg\n\n";
+    warn usage();
+    exit 2;
+}
+
+my %opt = (help => 0, json => 0);
+my @files;
+my $i = 0;
+while ($i < @ARGV) {
+    my $arg = $ARGV[$i++];
+    if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
+    elsif ($arg eq '--json') { $opt{json} = 1 }
+    elsif ($arg eq '--values') {
+        defined $ARGV[$i] or usage_bad("--values needs a value");
+        $opt{values} = $ARGV[$i++];
+    }
+    elsif ($arg eq '--column' || $arg eq '--pages' || $arg eq '--strict' || $arg eq '--csv-header') {
+        defined $ARGV[$i] or usage_bad("$arg needs a value");
+        $opt{$arg =~ s/^--//r} = $ARGV[$i++];
+    }
+    elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
+    else { push @files, $arg }
+}
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+
+if (defined $opt{values} && @files) {
+    usage_bad("give FILE or --values, not both");
+}
+usage_bad("FILE or --values is required") unless defined $opt{values} || @files == 1;
+
+my $config = tubular::Config->new();
+my $cfg = $config->as_hash();
+$opt{strict} = $cfg->{input}{strict} unless defined $opt{strict};
+$opt{csv_header} = $cfg->{input}{csv_header} unless defined $opt{csv_header};
+
+my $values;
+my $source;
+if (defined $opt{values}) {
+    my $seq = tubular::Sequence->from_string($opt{values}, strict => $opt{strict});
+    $values = [ $seq->values ];
+    $source = 'values';
+}
+else {
+    my $res = tubular::Extract->extract($files[0], mode => 'numbers', %opt);
+    if (!$res->{ok}) {
+        warn "bin/inspect: $res->{error}\n";
+        exit 1;
+    }
+    warn "bin/inspect: warning: $_\n" for @{ $res->{warnings} };
+    $values = $res->{values};
+    $source = $files[0];
+}
+
+my $s = tubular::Stats->analyze($values, recent => 100);
+if (!$s->{ok}) {
+    warn "bin/inspect: $s->{error}\n";
+    exit 1;
+}
+
+$s->{source} = $source;
+
+if ($opt{json}) {
+    print JSON::PP->new->utf8->canonical->pretty->encode($s);
+    exit 0;
+}
+
+my $n = scalar @$values;
+my @first = @{$values}[0 .. (($n >= 3) ? 2 : $n - 1)];
+my $lo = ($n >= 3) ? $n - 3 : 0;
+my @last = @{$values}[$lo .. $n - 1];
+
+printf "source:  %s\n", $source;
+printf "values:  %d\n", $s->{n};
+printf "unique:  %d\n", $s->{unique};
+printf "min/max: %g / %g\n", $s->{min}, $s->{max};
+printf "range:   %g\n", $s->{range};
+printf "mean:    %g\n", $s->{mean};
+printf "median:  %g\n", $s->{median};
+printf "mode:    %s\n", @{ $s->{mode} } ? join(', ', map { "$_" } @{ $s->{mode} }) : '(none)';
+printf "stddev:  %g\n", $s->{stddev};
+printf "first:   %s\n", join ' ', map { "$_" } @first;
+printf "last:    %s\n", join ' ', map { "$_" } @last;
+
+exit 0;

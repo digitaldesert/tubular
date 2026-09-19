@@ -1,0 +1,143 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use JSON::PP ();
+use File::Basename qw(dirname);
+use File::Spec ();
+
+our $VERSION = $tubular::Config::VERSION;
+
+my %REQUIRED_MODULES = (
+    'HTTP::Tiny'           => 1,
+    'JSON::PP'             => 1,
+    'Text::CSV'            => 1,
+    'CAM::PDF'             => 1,
+    'CAM::PDF::PageText'   => 1,
+);
+
+sub usage {
+    return <<'USAGE';
+tubular doctor - report the environment
+
+Usage:
+  bin/doctor [--json]
+
+Options:
+  --json    emit machine-readable JSON
+  -h, --help    show this help and exit
+USAGE
+}
+
+sub find_executable ($name) {
+    my $path = $ENV{PATH} // '/usr/local/bin:/usr/bin:/bin';
+    for my $dir (split /:/, $path) {
+        next unless length $dir;
+        my $cand = File::Spec->catfile($dir, $name);
+        return $cand if -x $cand && !-d $cand;
+    }
+    return undef;
+}
+
+sub module_info ($mod) {
+    my $file = "$mod";
+    $file =~ s/::/\//g;
+    $file .= '.pm';
+    my $ok = eval { require $file; 1 };
+    if (!$ok) {
+        return { present => JSON::PP::false, version => undef };
+    }
+    my $version = eval { $mod->VERSION };
+    $version = "$version" if defined $version;
+    return {
+        present => JSON::PP::true,
+        version => defined $version ? $version : undef,
+    };
+}
+
+sub nearest_writable ($dir) {
+    my $cur = $dir;
+    while (1) {
+        return $cur if -d $cur && -w $cur;
+        my $up = dirname($cur);
+        return undef if $up eq $cur;
+        $cur = $up;
+    }
+}
+
+sub gather ($config) {
+    my $home = $config->home;
+    my $zsfm_path = find_executable('zsfm');
+
+    my %modules;
+    for my $name (sort keys %REQUIRED_MODULES) {
+        $modules{$name} = module_info($name);
+    }
+
+    my $writable = nearest_writable($home);
+
+    return {
+        version         => $config->version,
+        perl_version    => "$^V",
+        config_file     => $config->config_path,
+        using_defaults  => $config->config_loaded ? JSON::PP::false : JSON::PP::true,
+        home            => $home,
+        home_exists     => -d $home ? JSON::PP::true : JSON::PP::false,
+        writable_path   => $writable,
+        modules         => \%modules,
+        zsfm            => {
+            found => defined $zsfm_path ? JSON::PP::true : JSON::PP::false,
+            path  => defined $zsfm_path ? $zsfm_path : undef,
+        },
+    };
+}
+
+sub render_text ($report) {
+    my @lines = ("tubular environment report");
+    push @lines, sprintf 'version:            %s', $report->{version};
+    push @lines, sprintf 'perl:               %s', $report->{perl_version};
+    push @lines, sprintf 'config file:        %s', $report->{config_file} // '(built-in defaults)';
+    push @lines, sprintf 'runtime home:       %s %s', $report->{home},
+        $report->{home_exists} ? '' : '(not created yet)';
+    push @lines, sprintf 'writable path:      %s', $report->{writable_path} // 'NONE';
+    push @lines, 'modules:';
+    for my $name (sort keys %{ $report->{modules} }) {
+        my $m = $report->{modules}{$name};
+        my $state = $m->{present} ? (defined $m->{version} ? "present ($m->{version})" : 'present') : 'MISSING';
+        push @lines, sprintf '  %-22s %s', $name, $state;
+    }
+    push @lines, sprintf 'zsfm:               %s', $report->{zsfm}{found} ? "present ($report->{zsfm}{path})" : 'not found (optional for deterministic features)';
+    return join "\n", @lines, '';
+}
+
+my $as_json = 0;
+for (@ARGV) {
+    if ($_ eq '--json') {
+        $as_json = 1;
+        last;
+    }
+    if ($_ eq '-h' || $_ eq '--help') {
+        print usage();
+        exit 0;
+    }
+}
+
+my @unknown = grep { !/\A--json\z/ && !/\A--?help\z/ } @ARGV;
+if (@unknown) {
+    die "bin/doctor: unknown argument '$unknown[0]'\n";
+}
+
+my $config = tubular::Config->new();
+my $report = gather($config);
+
+if ($as_json) {
+    print JSON::PP->new->utf8->canonical->pretty->encode($report);
+}
+else {
+    print render_text($report);
+}
+
+exit 0;

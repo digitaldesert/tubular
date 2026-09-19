@@ -1,0 +1,160 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use tubular::Extract ();
+use tubular::Sequence ();
+use tubular::Stats ();
+use JSON::PP ();
+
+sub usage {
+    return <<'USAGE';
+tubular stats - deterministic statistics for a sequence
+
+Usage:
+  bin/stats FILE [options]
+  bin/stats --values "1 2 3" [options]
+
+Options:
+  --values STRING   parse numbers from STRING instead of a file
+  --recent N        window for recent frequencies (default 100)
+  --column C        CSV: header name or 0-based column index
+  --pages RANGE     PDF: pages to read, e.g. 1-3,5
+  --strict 0|1      fail on malformed input (default from config)
+  --csv-header A    header policy: auto|always|never (default from config)
+  --json            emit machine-readable JSON
+  -h, --help        show this help and exit
+USAGE
+}
+
+sub usage_bad {
+    my $msg = shift;
+    warn "bin/stats: $msg\n\n";
+    warn usage();
+    exit 2;
+}
+
+my %opt = (help => 0, json => 0);
+my @files;
+my $i = 0;
+while ($i < @ARGV) {
+    my $arg = $ARGV[$i++];
+    if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
+    elsif ($arg eq '--json') { $opt{json} = 1 }
+    elsif ($arg eq '--values') {
+        defined $ARGV[$i] or usage_bad("--values needs a value");
+        $opt{values} = $ARGV[$i++];
+    }
+    elsif ($arg eq '--recent') {
+        defined $ARGV[$i] or usage_bad("--recent needs a value");
+        my $v = $ARGV[$i++];
+        usage_bad("--recent must be a positive integer") unless $v =~ /^\d+$/ && $v > 0;
+        $opt{recent} = $v;
+    }
+    elsif ($arg eq '--column' || $arg eq '--pages' || $arg eq '--strict' || $arg eq '--csv-header') {
+        defined $ARGV[$i] or usage_bad("$arg needs a value");
+        $opt{$arg =~ s/^--//r} = $ARGV[$i++];
+    }
+    elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
+    else { push @files, $arg }
+}
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+
+if (defined $opt{values} && @files) {
+    usage_bad("give FILE or --values, not both");
+}
+usage_bad("FILE or --values is required") unless defined $opt{values} || @files == 1;
+
+my $config = tubular::Config->new();
+my $cfg = $config->as_hash();
+$opt{strict} = $cfg->{input}{strict} unless defined $opt{strict};
+$opt{csv_header} = $cfg->{input}{csv_header} unless defined $opt{csv_header};
+
+my $values;
+my $source;
+if (defined $opt{values}) {
+    my $seq = tubular::Sequence->from_string($opt{values}, strict => $opt{strict});
+    $values = [ $seq->values ];
+    $source = 'values';
+}
+else {
+    my $res = tubular::Extract->extract($files[0], mode => 'numbers', %opt);
+    if (!$res->{ok}) {
+        warn "bin/stats: $res->{error}\n";
+        exit 1;
+    }
+    warn "bin/stats: warning: $_\n" for @{ $res->{warnings} };
+    $values = $res->{values};
+    $source = $files[0];
+}
+
+my $s = tubular::Stats->analyze($values, recent => $opt{recent});
+if (!$s->{ok}) {
+    warn "bin/stats: $s->{error}\n";
+    exit 1;
+}
+
+$s->{source} = $source;
+
+if ($opt{json}) {
+    print JSON::PP->new->utf8->canonical->pretty->encode($s);
+    exit 0;
+}
+
+sub pct { sprintf '%.4f', $_[0] }
+
+print "source:  $source\n";
+printf "values:  %d   unique:  %d\n", $s->{n}, $s->{unique};
+printf "min/max: %g / %g   range: %g\n", $s->{min}, $s->{max}, $s->{range};
+printf "mean:    %g   median: %g   stddev: %g\n", $s->{mean}, $s->{median}, $s->{stddev};
+printf "mode:    %s\n", @{ $s->{mode} } ? join(', ', map { "$_" } @{ $s->{mode} }) : '(none)';
+
+print "\nHistogram (empirical):\n";
+printf "  %-10s %6s %8s\n", 'value', 'count', 'p';
+for my $f (@{ $s->{histogram} }) {
+    printf "  %-10s %6d %8s\n", $f->{value}, $f->{count}, pct($f->{p});
+}
+
+print "\nRecent window (last $s->{recent}{window} values, empirical):\n";
+printf "  %-10s %6s %8s\n", 'value', 'count', 'p';
+for my $f (@{ $s->{recent}{counts} }) {
+    printf "  %-10s %6d %8s\n", $f->{value}, $f->{count}, pct($f->{p});
+}
+
+print "\nGaps (distance between occurrences):\n";
+printf "  %-10s %5s %8s %8s %8s\n", 'value', 'hits', 'avg_gap', 'max_gap', 'current_run';
+for my $g (@{ $s->{gaps} }) {
+    printf "  %-10s %5d %8s %8s %8d\n", $g->{value}, $g->{count},
+        (defined $g->{avg_gap} ? sprintf('%.2f', $g->{avg_gap}) : '-'),
+        (defined $g->{max_gap} ? $g->{max_gap} : '-'),
+        $g->{current_run};
+}
+
+print "\nFirst-order transitions (empirical):\n";
+printf "  %-10s %-10s %6s %8s\n", 'from', 'to', 'count', 'p';
+for my $t (@{ $s->{transitions} }) {
+    printf "  %-10s %-10s %6d %8s\n", $t->{from}, $t->{to}, $t->{count}, pct($t->{p});
+}
+
+print "\nSecond-order transitions (empirical):\n";
+printf "  %-10s %-10s %-10s %6s %8s\n", 'a', 'b', 'c', 'count', 'p';
+for my $t (@{ $s->{transitions2} }) {
+    printf "  %-10s %-10s %-10s %6d %8s\n", $t->{a}, $t->{b}, $t->{c}, $t->{count}, pct($t->{p});
+}
+
+print "\nStreaks:\n";
+printf "  longest run: %d\n", $s->{streaks}{max};
+printf "  current run: %d\n", $s->{streaks}{current};
+printf "  %-8s %6s\n", 'length', 'runs';
+for my $d (@{ $s->{streaks}{distribution} }) {
+    printf "  %-8d %6d\n", $d->{length}, $d->{count};
+}
+
+exit 0;

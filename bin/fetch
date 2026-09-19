@@ -1,0 +1,104 @@
+#!/usr/bin/env perl
+use v5.44;
+use warnings;
+
+use FindBin qw($RealBin);
+use lib "$RealBin/../lib";
+use tubular::Config ();
+use tubular::Fetch ();
+use JSON::PP ();
+
+sub usage {
+    return <<'USAGE';
+tubular fetch - fetch a remote resource
+
+Usage:
+  bin/fetch URL [options]
+
+Options:
+  --output FILE     write the resource to FILE
+  --timeout N       connection/read timeout in seconds
+  --max-bytes N     maximum download size in bytes
+  --sha256 HASH     require the downloaded bytes to match HASH
+  --force           overwrite an existing output file
+  --json            emit machine-readable JSON
+  -h, --help        show this help and exit
+
+Example:
+  bin/fetch https://example.com/data.csv --output data.csv
+USAGE
+}
+
+sub usage_bad {
+    my $msg = shift;
+    warn "bin/fetch: $msg\n\n";
+    warn usage();
+    exit 2;
+}
+
+my %opt = (help => 0, json => 0, force => 0);
+my @urls;
+my $i = 0;
+while ($i < @ARGV) {
+    my $arg = $ARGV[$i++];
+    if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
+    elsif ($arg eq '--json') { $opt{json} = 1 }
+    elsif ($arg eq '--force') { $opt{force} = 1 }
+    elsif ($arg eq '--output') {
+        defined $ARGV[$i] or usage_bad("--output needs a value");
+        $opt{output} = $ARGV[$i++];
+    }
+    elsif ($arg eq '--timeout') {
+        defined $ARGV[$i] or usage_bad("--timeout needs a value");
+        $opt{timeout} = $ARGV[$i++];
+        usage_bad("--timeout must be a positive number") unless $opt{timeout} =~ /^\d+$/ && $opt{timeout} > 0;
+    }
+    elsif ($arg eq '--max-bytes') {
+        defined $ARGV[$i] or usage_bad("--max-bytes needs a value");
+        $opt{max_bytes} = $ARGV[$i++];
+        usage_bad("--max-bytes must be a positive integer") unless $opt{max_bytes} =~ /^\d+$/ && $opt{max_bytes} > 0;
+    }
+    elsif ($arg eq '--sha256') {
+        defined $ARGV[$i] or usage_bad("--sha256 needs a value");
+        $opt{sha256} = $ARGV[$i++];
+        usage_bad("--sha256 must be a 64-hex digest") unless $opt{sha256} =~ /^[0-9a-fA-F]{64}$/;
+    }
+    elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
+    else { push @urls, $arg }
+}
+
+if ($opt{help}) {
+    print usage();
+    exit 0;
+}
+
+usage_bad("exactly one URL is required") unless @urls == 1;
+
+my $config = tubular::Config->new();
+my $fetch = tubular::Fetch->new();
+my $res = $fetch->fetch($urls[0], %opt, config => $config->as_hash());
+
+if ($opt{json}) {
+    my $out = { %$res };
+    delete $out->{content};
+    $out->{bin} = 'fetch';
+    print JSON::PP->new->utf8->canonical->pretty->encode($out);
+    exit($res->{ok} ? 0 : 1);
+}
+
+if (!$res->{ok}) {
+    warn "bin/fetch: $res->{error}\n";
+    exit 1;
+}
+
+if (defined $res->{output}) {
+    my @line = ("fetched $res->{bytes} bytes in " . sprintf('%.2f', $res->{elapsed}) . 's',
+        "sha256=$res->{sha256}", "-> $res->{output}");
+    print join("\n", @line), "\n";
+    exit 0;
+}
+
+binmode STDOUT;
+print {*STDOUT} $res->{content};
+warn "bin/fetch: $res->{bytes} bytes, sha256=$res->{sha256}\n";
+exit 0;
