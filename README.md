@@ -59,27 +59,72 @@ config; the config overrides built-in emergency defaults.
 
 ## The `zsfm` executable
 
-`zsfm` is a native forecasting CLI used for model inference only.
+`zsfm` is a native forecasting CLI used for model inference only. There are
+three separate things to install: **zsfm**, a **model**, and then the
+tubular run itself.
 
-Install with Cargo:
+### Installing zsfm
 
 ```
 cargo install zsfm --locked
 ```
 
-Verify:
+Verify with:
 
 ```
 zsfm --help
 ```
+
+The installed zsfm implements a subcommand CLI such as
+`zsfm timesfm infer` and provides no `--version` flag (tubular detects this
+and identifies the binary via `--help`). `bin/doctor` and
+`bin/models status` report the resolved path and helpers such as
+`zsfm path: ...`, `timesfm: supported`.
 
 Prebuilt `zsfm` binaries may be published for supported platforms; if no
 prebuilt binary is available for your platform (for example Intel macOS),
 building with Cargo is the supported path. See the upstream zsfm
 documentation for current platform-specific details.
 
+### Installing a model
+
 Model files are downloaded/converted explicitly via `bin/models setup`
-(see ROADMAP Phase 6). No model is downloaded implicitly.
+(see ROADMAP Phase 6). No model is downloaded implicitly — neither by
+zsfm nor by tubular:
+
+```
+bin/models setup timesfm --file /path/to/timesfm.gguf
+```
+
+or, for an explicit conversion-style install, the upstream GGUF produced
+by `zsfm timesfm convert`. The default dtype is `q8`
+(config `forecast.dtype`). `bin/models status` reports whether the runtime
+and a model are present.
+
+### Running forecasting
+
+With zsfm and a GGUF model in place, inference runs as a single process
+with a JSON request on stdin and a JSON forecast on stdout:
+
+```
+zsfm timesfm infer --gguf /abs/path/to/model.gguf
+```
+
+```
+{"context": [1, 2, 3], "horizon": 1}
+```
+
+The native output is normalised inside `tubular::Adapter::ZSFM` (the only
+place that understands raw zsfm JSON) into a stable shape
+`{ model, point, quantiles, raw_model }`.
+
+Environment variables used at the adapter boundary:
+
+- `TUBULAR_ZSFM` — path to the zsfm executable (override of PATH search).
+- `TUBULAR_INTEGRATION` — set to `1` to allow real native inference; the
+  adapter otherwise refuses so unit tests can mock the boundary.
+- `TUBULAR_ZSFM_GGUF` — TimesFM GGUF path used by the optional integration
+  test (config `forecast.gguf` is the fallback source for that path).
 
 tubular itself does NOT require Python, and zsfm native inference does NOT
 require Python or PyTorch. Model files remain governed by their own licenses.
@@ -143,9 +188,18 @@ Run the full suite from the repository root:
 prove -lr t
 ```
 
-The optional `TUBULAR_INTEGRATION=1` environment variable switches on
-subtests that invoke a real external `zsfm`; without it those subtests are
-skipped so the whole suite passes offline.
+The optional `TUBULAR_INTEGRATION=1` environment variable switches on tests
+that invoke a real external `zsfm`; without it those tests are skipped so
+the whole suite passes offline. Real model inference additionally needs a
+TimesFM GGUF, supplied through `TUBULAR_ZSFM_GGUF` (or config
+`forecast.gguf`):
+
+```
+TUBULAR_INTEGRATION=1 TUBULAR_ZSFM_GGUF=/abs/path/to/model.gguf prove -lr t/t/16-zsfm-integration.t
+```
+
+The integration test asserts plumbing only (process success, valid JSON,
+normalized response, horizon length) — never a specific forecast value.
 
 ## Scientific limitation
 

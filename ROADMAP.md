@@ -40,7 +40,10 @@ Update a phase's status to DONE only after `prove -lr t` passes.
 
 ## Phase 5 — ZSFM adapter
 
-- status: DONE (prove -lr t passes; real-model integration not run, zsfm absent)
+- status: DONE (prove -lr t passes; adapter certified against the real
+  `zsfm timesfm infer --gguf` CLI on this machine; real model inference not
+  run yet — no TimesFM GGUF present, so `TUBULAR_INTEGRATION=1
+  TUBULAR_ZSFM_GGUF=... prove -lr t/t/16-zsfm-integration.t` remains skipped)
 - goal: Safe integration with native zsfm CLI
 - major files: lib/tubular/Adapter/ZSFM.pm
 - completion: locate/version/invoke zsfm, JSON in/out, timeout, mocks when

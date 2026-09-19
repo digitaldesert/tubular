@@ -29,6 +29,9 @@ my %BUILTIN_DEFAULTS = (
         runner            => 'zsfm',
         model             => 'timesfm',
         dtype             => 'q8',
+        gguf              => '',
+        zsfm_path         => '',
+        timeout           => 120,
         horizon           => 1,
         top               => 2,
         mode              => 'auto',
@@ -125,10 +128,10 @@ sub _validate_basic ($self, $data) {
         }
     }
     if (ref $data->{forecast} eq 'HASH') {
-        for my $k (qw(horizon top backtest_windows)) {
+        for my $k (qw(horizon top backtest_windows timeout)) {
             $self->_check_num(\@bad, "forecast.$k", $data->{forecast}{$k});
         }
-        for my $k (qw(runner model dtype mode)) {
+        for my $k (qw(runner model dtype mode gguf zsfm_path)) {
             push @bad, "forecast.$k must be a plain string"
                 if defined $data->{forecast}{$k} && ref $data->{forecast}{$k};
         }

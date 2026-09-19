@@ -81,6 +81,10 @@ delete @ENV{qw(TUBULAR_CONFIG)};
 my $home = tempdir(CLEANUP => 1);
 $ENV{TUBULAR_HOME} = $home;
 
+# Hermetic PATH: the offline suite must not observe a zsfm installed on the
+# host. All child commands are run via the absolute perl binary.
+$ENV{PATH} = tempdir(CLEANUP => 1);
+
 my $models = File::Spec->catdir($home, 'models');
 
 subtest 'list with no models' => sub {
@@ -183,7 +187,7 @@ subtest 'status reports zsfm availability' => sub {
 
     my $fake = File::Spec->catfile($home, 'zsfm');
     open my $fh, '>:raw', $fake or die "write: $!";
-    print {$fh} "#!/usr/bin/env perl\nprint \"zsfm 9.9.9 (fake)\\n\";\nexit 0;\n";
+    print {$fh} "#!$^X\nprint \"zsfm 9.9.9 (fake)\\n\";\nexit 0;\n";
     close $fh;
     chmod 0755, $fake;
 

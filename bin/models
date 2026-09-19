@@ -182,12 +182,17 @@ if ($cmd eq 'path') {
 
 if ($cmd eq 'status') {
     my $name = shift @rest;
-    my $zsfm = tubular::Adapter::ZSFM->new(path => $ENV{TUBULAR_ZSFM});
-    my $zpath = $zsfm->find();
+    my $zpath_cfg = $cfg->{forecast}{zsfm_path};
+    my $adapter = tubular::Adapter::ZSFM->new(
+        path    => (defined $zpath_cfg && length $zpath_cfg) ? $zpath_cfg : $ENV{TUBULAR_ZSFM},
+        timeout => $cfg->{forecast}{timeout},
+    );
+    my $zpath = $adapter->find();
     my $zver = undef;
     if (defined $zpath) {
-        my $v = $zsfm->version();
+        my $v = $adapter->version();
         $zver = $v->{version} if $v->{ok};
+        $zver = undef if defined $zver && $zver eq '';
     }
     my %info = (
         ok      => 1,
@@ -232,7 +237,12 @@ if ($cmd eq 'status') {
         exit 0;
     }
     printf "run dir:      %s\n", $dir;
-    printf "zsfm:         %s\n", defined $info{zsfm} ? "$info{zsfm}{path} ($info{zsfm}{version})" : 'not found';
+    printf "zsfm:         %s\n", defined $info{zsfm}
+        ? "$info{zsfm}{path}"
+            . (defined $info{zsfm}{version} && length $info{zsfm}{version}
+                ? " ($info{zsfm}{version})"
+                : ' (no --version flag)')
+        : 'not found';
     printf "defaults:     model=%s dtype=%s\n", $info{default_model}, $info{default_dtype};
     if (!@models) {
         print "installed:    none\n";
