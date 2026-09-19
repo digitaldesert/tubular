@@ -12,6 +12,10 @@
     "csv_header": "auto"
   },
 
+  "models": {
+    "max_bytes": 21474836480
+  },
+
   "forecast": {
     "runner": "zsfm",
     "model": "timesfm",

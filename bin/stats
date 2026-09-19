@@ -54,9 +54,21 @@ while ($i < @ARGV) {
         usage_bad("--recent must be a positive integer") unless $v =~ /^\d+$/ && $v > 0;
         $opt{recent} = $v;
     }
-    elsif ($arg eq '--column' || $arg eq '--pages' || $arg eq '--strict' || $arg eq '--csv-header') {
+    elsif ($arg eq '--column' || $arg eq '--pages') {
         defined $ARGV[$i] or usage_bad("$arg needs a value");
         $opt{$arg =~ s/^--//r} = $ARGV[$i++];
+    }
+    elsif ($arg eq '--strict') {
+        defined $ARGV[$i] or usage_bad("--strict needs a value");
+        my $v = $ARGV[$i++];
+        usage_bad("--strict must be 0 or 1") unless $v =~ /^[01]$/;
+        $opt{strict} = $v ? 1 : 0;
+    }
+    elsif ($arg eq '--csv-header') {
+        defined $ARGV[$i] or usage_bad("--csv-header needs a value");
+        my $v = $ARGV[$i++];
+        usage_bad("--csv-header must be auto, always or never") unless $v =~ /^(?:auto|always|never)$/;
+        $opt{csv_header} = $v;
     }
     elsif ($arg =~ /^-/) { usage_bad("unknown option '$arg'") }
     else { push @files, $arg }

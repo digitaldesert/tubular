@@ -52,7 +52,7 @@ sub evaluate ($class, %args) {
     }
 
     my @methods = $args{methods} ? @{ $args{methods} } : qw(last mean markov1 histogram);
-    push @methods, 'random' if defined $args{seed};
+    push @methods, 'random' if defined $args{seed} && !grep { $_ eq 'random' } @methods;
 
     # Evaluation positions: 1-based last training index.
     my @pos = ($res->{min_train} - 1) .. (@$values - 2);

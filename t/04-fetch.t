@@ -100,6 +100,44 @@ subtest 'output written atomically' => sub {
     is(scalar @leftover, 0, 'no temp file left behind');
 };
 
+subtest 'streaming to output is memory-safe' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'stream.bin');
+    my $f = tubular::Fetch->new;
+    my $res = $f->fetch(url_of('/ok'), output => $out);
+    ok($res->{ok}, 'ok');
+    is($res->{bytes}, length $body, 'byte count from stream');
+    is($res->{sha256}, Digest::SHA::sha256_hex($body), 'sha256 from stream');
+    ok(!defined $res->{content}, 'content not buffered when streaming');
+    ok(-e $out, 'file present');
+    my @leftover = glob File::Spec->catfile($dir, '.tubular-fetch.*.tmp');
+    is(scalar @leftover, 0, 'no temp files');
+};
+
+subtest 'streaming aborts cleanly on max_bytes' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'big.bin');
+    my $f = tubular::Fetch->new;
+    my $res = $f->fetch(url_of('/ok'), output => $out, max_bytes => 10);
+    ok(!$res->{ok}, 'too-small limit fails while streaming');
+    like($res->{error}, qr/max_bytes/, 'error mentions limit');
+    ok(!-e $out, 'no output file left');
+    my @leftover = glob File::Spec->catfile($dir, '.tubular-fetch.*.tmp');
+    is(scalar @leftover, 0, 'no temp files');
+};
+
+subtest 'streaming sha256 mismatch leaves no file' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'bad.bin');
+    my $f = tubular::Fetch->new;
+    my $res = $f->fetch(url_of('/ok'), output => $out, sha256 => 'x' x 64);
+    ok(!$res->{ok}, 'mismatch rejected while streaming');
+    like($res->{error}, qr/SHA-256 mismatch/, 'error explains mismatch');
+    ok(!-e $out, 'no output file on mismatch');
+    my @leftover = glob File::Spec->catfile($dir, '.tubular-fetch.*.tmp');
+    is(scalar @leftover, 0, 'no temp files');
+};
+
 subtest 'no overwrite without force; force overwrites' => sub {
     my $dir = tempdir(CLEANUP => 1);
     my $out = File::Spec->catfile($dir, 'out.txt');

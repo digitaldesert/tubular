@@ -7,10 +7,11 @@ WriteMakefile(
     AUTHOR        => 'tubular developers',
     LICENSE       => 'mit',
     PREREQ_PM     => {
-        'HTTP::Tiny'  => 0,
-        'JSON::PP'    => 0,
-        'Text::CSV'   => 0,
-        'CAM::PDF'    => 0,
+        'HTTP::Tiny'          => 0,
+        'JSON::PP'            => 0,
+        'Text::CSV'           => 0,
+        'CAM::PDF'            => 0,
+        'CAM::PDF::PageText'  => 0,
     },
     TEST_REQUIRES => {
         'Test::More'  => 0,

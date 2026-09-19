@@ -199,9 +199,19 @@ subtest 'json output parses' => sub {
     my $j = eval { JSON::PP::decode_json($o) };
     ok($j, 'valid JSON');
     is($j->{ok}, 1, 'ok flag');
+    is($j->{command}, 'status', 'command field consistent');
     is($j->{model}{name}, 'timesfm', 'model name');
     is($j->{model}{present}, 1, 'present flag');
     is($j->{model}{sha256}, $gguf_sha, 'sha in JSON');
+};
+
+subtest 'status --json lists command field' => sub {
+    my ($o, $e, $code) = run($binmodels, '--json', 'status');
+    is($code, 0, 'exit 0');
+    my $j = eval { JSON::PP::decode_json($o) };
+    ok($j, 'valid JSON');
+    is($j->{command}, 'status', 'list-status carries command');
+    is($j->{ok}, 1, 'ok flag');
 };
 
 subtest 'no command nor --help exits 2' => sub {

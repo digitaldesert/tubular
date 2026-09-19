@@ -22,16 +22,18 @@ sub fetch ($self, $url, %args) {
     my $max_bytes  = defined $args{max_bytes}  ? $args{max_bytes}  : _cfg($cfg, qw(fetch max_bytes), 52_428_800);
     my $user_agent = defined $args{user_agent} ? $args{user_agent} : _cfg($cfg, qw(fetch user_agent), 'tubular/0.1');
 
+    my $output = defined $args{output} && length $args{output} ? $args{output} : undef;
+
     my $result = {
-        url        => $url,
+        url         => $url,
         http_status => undef,
-        bytes      => 0,
-        sha256     => undef,
-        output     => $args{output},
-        content    => undef,
-        elapsed    => 0,
-        ok         => 0,
-        error      => undef,
+        bytes       => 0,
+        sha256      => undef,
+        output      => $output,
+        content     => undef,
+        elapsed     => 0,
+        ok          => 0,
+        error       => undef,
     };
 
     if (!defined $url || $url !~ m{\Ahttps?://}i) {
@@ -39,8 +41,8 @@ sub fetch ($self, $url, %args) {
         return $result;
     }
 
-    if (defined $args{output} && -e $args{output} && !$args{force}) {
-        $result->{error} = "output exists (use --force to overwrite): $args{output}";
+    if (defined $output && -e $output && !$args{force}) {
+        $result->{error} = "output exists (use --force to overwrite): $output";
         return $result;
     }
 
@@ -51,15 +53,69 @@ sub fetch ($self, $url, %args) {
         verify_SSL  => 1,
     );
 
+    # Streaming path: when an output file is requested the body is written
+    # incrementally to a temp file (memory-safe for large downloads) instead
+    # of being buffered in memory. The temp file is only renamed into place
+    # after the download, size check and SHA-256 verification succeed.
+    my $tmp = defined $output ? File::Spec->catfile(dirname($output), ".tubular-fetch.$$.tmp") : undef;
+    my $fh;
+    my $sha = Digest::SHA->new(256);
+    my $bytes = 0;
+    my $overflow = 0;
+
+    if (defined $tmp) {
+        unless (open $fh, '>:raw', $tmp) {
+            $result->{error} = "cannot write $tmp: $!";
+            return $result;
+        }
+    }
+
+    my $resp;
     my $start = time();
-    my $resp = eval { $ua->get($url) };
+    if (defined $fh) {
+        $resp = eval {
+            $ua->get($url, {
+                data_callback => sub {
+                    my ($chunk) = @_;
+                    $bytes += length $chunk;
+                    if (defined $max_bytes && $bytes > $max_bytes) {
+                        $overflow = 1;
+                        return -1;
+                    }
+                    print {$fh} $chunk or return -1;
+                    $sha->add($chunk);
+                    return 1;
+                },
+            });
+        };
+    }
+    else {
+        $resp = eval { $ua->get($url) };
+    }
     $result->{elapsed} = time() - $start;
+
+    if (defined $fh) {
+        unless (close $fh) {
+            unlink $tmp if -e $tmp;
+            $result->{error} = "write failed for $tmp: $!";
+            return $result;
+        }
+        $fh = undef;
+    }
+
     if ($@) {
+        unlink $tmp if defined $tmp && -e $tmp;
         $result->{error} = "request failed: $@";
         return $result;
     }
 
     $result->{http_status} = $resp->{status};
+
+    if ($overflow) {
+        unlink $tmp if defined $tmp && -e $tmp;
+        $result->{error} = "response exceeds max_bytes ($max_bytes): download aborted";
+        return $result;
+    }
 
     if ($resp->{status} == 599) {
         my $msg = $resp->{content} // 'download failed';
@@ -69,32 +125,45 @@ sub fetch ($self, $url, %args) {
         else {
             $result->{error} = "download failed: $msg";
         }
+        unlink $tmp if defined $tmp && -e $tmp;
         return $result;
     }
 
     if ($resp->{status} !~ /^2\d\d$/) {
-        $result->{error} = "HTTP " . $resp->{status} . " "
+        $result->{error} = 'HTTP ' . $resp->{status} . ' '
             . ($resp->{reason} // '') . " for $url";
+        unlink $tmp if defined $tmp && -e $tmp;
         return $result;
     }
 
-    my $content = $resp->{content} // '';
-    $result->{bytes} = length $content;
-    $result->{sha256} = $self->_sha256($content);
-    $result->{content} = $content;
+    if (defined $tmp) {
+        $result->{bytes}  = $bytes;
+        $result->{sha256} = $sha->hexdigest;
+        $result->{content} = undef;
+    }
+    else {
+        my $content = $resp->{content} // '';
+        $result->{bytes}  = length $content;
+        $result->{sha256} = $self->_sha256($content);
+        $result->{content} = $content;
+    }
 
     if (defined $args{sha256} && length $args{sha256}) {
         if (lc $args{sha256} ne lc $result->{sha256}) {
             my $got = substr($result->{sha256}, 0, 12);
             my $exp = substr($args{sha256}, 0, 12);
             $result->{error} = "SHA-256 mismatch (expected ...$exp, got ...$got)";
+            unlink $tmp if defined $tmp && -e $tmp;
             return $result;
         }
     }
 
-    if (defined $args{output} && length $args{output}) {
-        $result->{error} = $self->_write_atomic($args{output}, $content);
-        return $result if $result->{error};
+    if (defined $tmp) {
+        unless (rename $tmp, $output) {
+            unlink $tmp if -e $tmp;
+            $result->{error} = "cannot rename $tmp -> $output: $!";
+            return $result;
+        }
     }
 
     $result->{ok} = 1;
@@ -112,22 +181,6 @@ sub _cfg ($cfg, @keys) {
         $v = $v->{$k};
     }
     return $v;
-}
-
-sub _write_atomic ($self, $target, $content) {
-    my $dir = dirname($target);
-    my $tmp = File::Spec->catfile($dir, ".tubular-fetch.$$.tmp");
-    eval {
-        open my $fh, '>:raw', $tmp or die "cannot write $tmp: $!";
-        print {$fh} $content or die "cannot write $tmp: $!";
-        close $fh or die "cannot close $tmp: $!";
-        rename $tmp, $target or die "cannot rename $tmp -> $target: $!";
-    };
-    if ($@) {
-        unlink $tmp if -e $tmp;
-        return "write failed for $target: $@";
-    }
-    return undef;
 }
 
 1;
@@ -171,10 +224,11 @@ Behaviour:
 
 =back
 
-C<fetch> returns a result hashref with C<ok>, C<error>, C<http_status>,
-C<bytes>, C<sha256>, C<output>, C<content> and C<elapsed>. C<content>
-holds the fetched bytes; pass C<--json>-style callers should not print it.
-The output file (if requested) is written only after the download and
-SHA-256 verification succeed.
+When an C<output> file is requested the body is streamed incrementally to a
+temp file (memory-safe for large downloads) and C<content> is left undefined;
+otherwise the body is buffered and returned via C<content>. Either way the
+result carries C<ok>, C<error>, C<http_status>, C<bytes>, C<sha256>,
+C<output> and C<elapsed>. The output file (if requested) is written only
+after the download, size check and SHA-256 verification succeed.
 
 =cut

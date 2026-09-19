@@ -22,6 +22,9 @@ my %BUILTIN_DEFAULTS = (
         strict     => 1,
         csv_header => 'auto',
     },
+    models => {
+        max_bytes => 21_474_836_480,    # 20 GiB, model downloads
+    },
     forecast => {
         runner            => 'zsfm',
         model             => 'timesfm',
@@ -100,10 +103,13 @@ sub _validate_basic ($self, $data) {
         push @bad, "$key must be a plain string"
             if exists $data->{$key} && defined $data->{$key} && ref $data->{$key};
     }
-    for my $group (qw(fetch input forecast)) {
+    for my $group (qw(fetch input models forecast)) {
         next unless defined $data->{$group};
         push @bad, "$group must be an object"
             if ref($data->{$group}) ne 'HASH';
+    }
+    if (ref $data->{models} eq 'HASH') {
+        $self->_check_num(\@bad, 'models.max_bytes', $data->{models}{max_bytes});
     }
     if (ref $data->{fetch} eq 'HASH') {
         $self->_check_num(\@bad, 'fetch.timeout', $data->{fetch}{timeout});

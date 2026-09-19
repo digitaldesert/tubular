@@ -158,6 +158,24 @@ subtest 'backtest CLI --json' => sub {
     is($j->{methods}[0]{hit_rate}, 0.5, 'hit rate 2/4');
 };
 
+subtest 'random baseline requires a seed and never duplicates' => sub {
+    my (undef, $e, $code) = run($binbacktest, '--values', '5 5 9 5 9', '--min-train', '1', '--methods', 'random');
+    is($code, 2, 'random without --seed rejected');
+    like($e, qr/requires --seed/, 'message');
+
+    my ($o, undef, $code2) = run($binbacktest, '--values', '5 5 9 5 9', '--min-train', '1', '--methods', 'random', '--seed', '3');
+    is($code2, 0, 'random with --seed ok');
+    my $rows = () = $o =~ /^random\s+/mg;
+    is($rows, 1, 'exactly one random row (no duplication)');
+
+    (my $jo, undef, $code2) = run($binbacktest, '--json', '--values', '5 5 9 5 9', '--min-train', '1', '--methods', 'random', '--seed', '3');
+    is($code2, 0, 'json ok');
+    my $j = eval { JSON::PP::decode_json($jo) };
+    ok($j, 'valid JSON');
+    my $random_rows = grep { $_->{method} eq 'random' } @{ $j->{methods} };
+    is($random_rows, 1, 'one random entry in JSON');
+};
+
 subtest 'backtest CLI errors and dispatch' => sub {
     my (undef, $e, $code) = run($binbacktest, '--values', '7');
     is($code, 1, 'too few values exit 1');

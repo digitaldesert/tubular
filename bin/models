@@ -13,6 +13,7 @@ use File::Spec ();
 use File::Basename qw(basename);
 use File::Copy qw(copy);
 use Time::Piece ();
+use File::Path qw(make_path);
 
 sub usage {
     return <<'USAGE';
@@ -28,6 +29,8 @@ Usage:
 
 Models live in <home>/models. Downloads happen only when you ask for them:
 setup with --url or --file. The default dtype is q8 (config forecast.dtype).
+Model downloads are streamed to disk and capped at config models.max_bytes
+(20 GiB default) instead of the small fetch.max_bytes limit.
 USAGE
 }
 
@@ -74,7 +77,7 @@ my $SAFE = qr/^[A-Za-z0-9._-]+$/;
 sub models_dir ($config) {
     my $dir = File::Spec->catdir($config->home, 'models');
     if (!-d $dir) {
-        mkdir $dir or die "bin/models: cannot create $dir: $!\n";
+        make_path $dir or die "bin/models: cannot create $dir: $!\n";
     }
     return $dir;
 }
@@ -96,6 +99,22 @@ sub read_manifest ($dir, $name) {
     close $fh;
     my $m = eval { JSON::PP::decode_json($raw) };
     return (ref $m eq 'HASH') ? $m : undef;
+}
+
+# Write a file atomically: temp file in the same directory, then rename.
+sub write_atomic ($path, $content) {
+    my $tmp = "$path.tmp.$$";
+    eval {
+        open my $fh, '>:raw', $tmp or die "cannot write $tmp: $!";
+        print {$fh} $content or die "cannot write $tmp: $!";
+        close $fh or die "cannot close $tmp: $!";
+        rename $tmp, $path or die "cannot rename $tmp -> $path: $!";
+    };
+    if ($@) {
+        unlink $tmp if -e $tmp;
+        return "write failed for $path: $@";
+    }
+    return undef;
 }
 
 sub out ($name, %fields) {
@@ -125,7 +144,7 @@ if ($cmd eq 'list') {
         push @models, $m;
     }
     if ($opt{json}) {
-        my $res = { ok => 1, models => \@models };
+        my $res = { ok => 1, command => 'list', models => \@models };
         print JSON::PP->new->utf8->canonical->pretty->encode($res);
         exit 0;
     }
@@ -206,6 +225,8 @@ if ($cmd eq 'status') {
     }
     $info{models} = \@models;
 
+    $info{command} = 'status';
+
     if ($opt{json}) {
         print JSON::PP->new->utf8->canonical->pretty->encode(\%info);
         exit 0;
@@ -242,7 +263,8 @@ if ($cmd eq 'status') {
     my $file = model_file_path($dir, $name, $dtype);
     if (-e $file || read_manifest($dir, $name)) {
         unless ($opt{force}) {
-            out('setup', ok => 0, dtype => $dtype, message => "model '$name' already installed (use --force to replace)");
+            out('setup', ok => 0, name => $name, dtype => $dtype,
+                message => "model '$name' already installed (use --force to replace)");
         }
     }
 
@@ -270,7 +292,9 @@ if ($cmd eq 'status') {
     }
     else {
         my $fetch = tubular::Fetch->new;
-        my $res = $fetch->fetch($url, output => $file, force => 1, config => $cfg, timeout => 60);
+        my $res = $fetch->fetch($url, output => $file, force => 1,
+            config => $cfg, timeout => 60,
+            max_bytes => $cfg->{models}{max_bytes});
         if (!$res->{ok}) {
             unlink $file if -e $file;
             out('setup', ok => 0, message => "download failed: $res->{error}");
@@ -289,9 +313,11 @@ if ($cmd eq 'status') {
         bytes   => $bytes,
         created => scalar Time::Piece->new->epoch,
     };
-    open my $mh, '>:utf8', manifest_path($dir, $name) or out('setup', ok => 0, message => "cannot write manifest: $!");
-    print {$mh} JSON::PP->new->utf8->canonical->pretty->encode($manifest);
-    close $mh;
+    my $json = JSON::PP->new->utf8->canonical->pretty->encode($manifest);
+    my $werr = write_atomic(manifest_path($dir, $name), $json);
+    if (defined $werr) {
+        out('setup', ok => 0, message => $werr);
+    }
 
     out('setup', ok => 1, name => $name, dtype => $dtype, file => $file,
         sha256 => $sha256, bytes => $bytes, message => "installed $name ($dtype): $file");
