@@ -27,6 +27,7 @@ WriteMakefile(
         'bin/models',
         'bin/forecast',
         'bin/backtest',
+        'bin/image',
     ],
     MIN_PERL_VERSION => '5.44.0',
 );

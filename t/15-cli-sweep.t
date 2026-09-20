@@ -28,7 +28,7 @@ sub run (@args) {
 local %ENV = %ENV;
 delete @ENV{qw(TUBULAR_CONFIG TUBULAR_HOME)};
 
-my @bins = qw(doctor fetch extract inspect stats models forecast backtest);
+my @bins = qw(doctor fetch extract inspect stats models forecast backtest image);
 
 subtest '--help works on every command' => sub {
     for my $b (@bins) {

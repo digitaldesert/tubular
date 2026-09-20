@@ -16,6 +16,11 @@
     "max_bytes": 21474836480
   },
 
+  "image": {
+    "base_url": "http://127.0.0.1:20128/v1",
+    "timeout": 300
+  },
+
   "forecast": {
     "runner": "zsfm",
     "model": "timesfm",

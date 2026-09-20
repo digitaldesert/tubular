@@ -15,6 +15,7 @@ my %COMMANDS = map { $_ => 1 } qw(
     backtest
     models
     doctor
+    image
 );
 
 sub usage {
@@ -33,6 +34,7 @@ Commands:
   backtest   backtest forecasting methods
   models     manage forecasting models
   doctor     report environment status
+  image      generate images through the OmniRoute API
 
 Options:
   -h, --help     show this help and exit

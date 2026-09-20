@@ -140,6 +140,7 @@ bin/tubular forecast numbers.txt
 bin/tubular forecast --ensemble numbers.txt
 bin/tubular backtest numbers.txt
 bin/tubular models list
+bin/tubular image --model MODEL --prompt "PROMPT"
 bin/doctor
 ```
 
@@ -179,6 +180,66 @@ bin/backtest --window 50 --min-train 10 numbers.txt
 
 STDOUT carries successful output/data; warnings and errors go to STDERR.
 Failures exit with a non-zero status.
+
+## Image generation
+
+`bin/image` generates images through the **OmniRoute** API, which exposes an
+OpenAI-compatible image generation endpoint
+(`POST /v1/images/generations`). The API key must be available in the
+`OMNIROUTE_API_KEY` environment variable; it is never hard-coded or printed.
+
+Image models are referenced in OmniRoute's `provider/model` form, for
+example `aihorde/Flux.1-Schnell fp8 (Compact)`:
+
+```
+bin/image \
+    --model aihorde/Flux.1-Schnell\ fp8\ \(Compact\) \
+    --prompt "A watercolor painting of Ottawa in autumn"
+```
+
+A prompt can also be piped via STDIN; `--prompt` always wins over a piped
+prompt:
+
+```
+echo "A cinematic moonlit forest" | bin/image \
+    --model aihorde/SDXL\ 1.0 \
+    --size 1024x1024 \
+    --output forest.png
+```
+
+Useful options: `--output FILE` (default `image-YYYYMMDD-HHMMSS.png`),
+`--size 1024x1024` (or `--width W --height H`), `--n N`, `--format
+png|jpg|jpeg|webp`, `--quality low|medium|high`, `--negative-prompt TEXT`,
+`--seed N`, `--timeout N` (seconds, default configurable via `image.timeout`,
+300 s = 300000 ms effective) and `--force` to overwrite existing files.
+
+### Queues, wait times and providers
+
+`aihorde/*` models generate through the AI Horde queue: every job is queued
+and served when a worker is free, so a request can take minutes (raise
+`--timeout` accordingly). `bin/image` is queue-aware:
+
+- when the provider reports a wait time or queue position (top-level
+  `wait_time` / `queue_position`, or `queue: { wait_time, position }`), the
+  values are printed after a successful generation and included in `--json`
+  output as `wait_time` and `queue_position`;
+- if a response comes back queued but without image data, `bin/image` fails
+  with an explicit "still queued" error instead of a bare "no image data";
+- if no worker picks the job up, OmniRoute returns a worker-unavailable error
+  (`HTTP 400` `invalid_request_error` or `HTTP 503` `service_unavailable`);
+  `bin/image` explains that this is a queue wait (retry in a bit) and, in
+  `--json` mode, also surfaces the structured `error_code`/`error_type`.
+
+Use `--json` for machine-readable output; it reports `ok`, `model`, `prompt`,
+`base_url`, `requested_n`, per-image `file`/`bytes`/`ext`/`source`/`url`, and
+the optional `wait_time`/`queue_position` fields.
+`--n N` writes numbered output files such as `squirrel-001.png`. Responses
+carrying either base64 image data or an image URL are both handled. See
+`bin/image --help` and `tubular::Image` for full details. Never run image
+generation in the offline test suite.
+
+The OmniRoute base URL and timeout come from config `image.base_url` and
+`image.timeout` (defaults `http://127.0.0.1:20128/v1` and 300).
 
 ## Testing
 

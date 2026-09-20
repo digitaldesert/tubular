@@ -25,6 +25,10 @@ my %BUILTIN_DEFAULTS = (
     models => {
         max_bytes => 21_474_836_480,    # 20 GiB, model downloads
     },
+    image => {
+        base_url => 'http://127.0.0.1:20128/v1',    # OmniRoute OpenAI-compatible base
+        timeout  => 300,                             # seconds (300000 ms effective)
+    },
     forecast => {
         runner            => 'zsfm',
         model             => 'timesfm',
@@ -106,7 +110,7 @@ sub _validate_basic ($self, $data) {
         push @bad, "$key must be a plain string"
             if exists $data->{$key} && defined $data->{$key} && ref $data->{$key};
     }
-    for my $group (qw(fetch input models forecast)) {
+    for my $group (qw(fetch input models forecast image)) {
         next unless defined $data->{$group};
         push @bad, "$group must be an object"
             if ref($data->{$group}) ne 'HASH';
@@ -126,6 +130,11 @@ sub _validate_basic ($self, $data) {
             push @bad, 'input.strict must be a boolean'
                 unless grep { $_ eq $s } (1, 0, 'true', 'false', 'yes', 'no');
         }
+    }
+    if (ref $data->{image} eq 'HASH') {
+        $self->_check_num(\@bad, 'image.timeout', $data->{image}{timeout});
+        push @bad, 'image.base_url must be a plain string'
+            if defined $data->{image}{base_url} && ref $data->{image}{base_url};
     }
     if (ref $data->{forecast} eq 'HASH') {
         for my $k (qw(horizon top backtest_windows timeout)) {
