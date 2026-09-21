@@ -31,6 +31,7 @@ subtest 'default project config' => sub {
     ok($cfg->config_loaded, 'config loaded');
     is($cfg->project_root, $root, 'project root found');
     is($cfg->get('forecast', 'model'), 'timesfm', 'forecast.model default from config.json');
+    is($cfg->get('image', 'horde_base_url'), 'https://aihorde.net/api', 'image.horde_base_url from config.json');
     is($cfg->get('fetch', 'timeout'), 30, 'fetch.timeout from config.json');
     is($cfg->get('home'), '.tubular', 'home default');
     ok(-e $cfg->config_path, 'config path exists');

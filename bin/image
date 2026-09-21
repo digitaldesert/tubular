@@ -6,21 +6,23 @@ use FindBin qw($RealBin);
 use lib "$RealBin/../lib";
 use tubular::Config ();
 use tubular::Image ();
+use tubular::Adapter::Horde ();
 use JSON::PP ();
 use File::Basename qw(fileparse);
 use Time::Piece ();
 
 sub usage {
     return <<'USAGE';
-tubular image - generate images through OmniRoute (OpenAI-compatible API)
+tubular image - generate images through OmniRoute or native AI Horde
 
 Usage:
   bin/image --model MODEL --prompt "PROMPT" [options]
   echo "PROMPT" | bin/image --model MODEL [options]
 
 Options:
-  --model MODEL       image model served by OmniRoute (required); models use
-                      provider/model form, e.g. aihorde/SDXL 1.0
+  --model MODEL       image model (required). aihorde/* and horde/* go to the
+                      native AI Horde API; other models use OmniRoute's
+                      provider/model form
   --prompt TEXT       prompt text (required unless a prompt is piped via STDIN)
   --output FILE       output file; default image-YYYYMMDD-HHMMSS.png
   --size SIZE         image size, e.g. 1024x1024 or 'auto'
@@ -29,11 +31,20 @@ Options:
   --n N               number of images to generate (default 1)
   --format EXT        output format/extension: png | jpg | jpeg | webp
   --quality Q         quality: low | medium | high
-  --negative-prompt T negative prompt (backends that support it)
+  --negative-prompt T negative prompt (Horde: appended after ###)
   --seed N            deterministic seed (backends that support it)
+  --nsfw              classify an aihorde request as NSFW (skips workers
+                      that censor; implies --no-censor-nsfw)
+  --no-nsfw           classify an aihorde request as SFW (default)
+  --censor-nsfw       if SFW, ask Horde workers to replace accidental NSFW
+                      output with a placeholder (default for aihorde)
+  --no-censor-nsfw    do not ask Horde workers to censor NSFW output
   --timeout N         request timeout in seconds (default from config, 300 =
                       300000 ms effective)
-  --base-url URL      OmniRoute base URL (default from config image.base_url)
+  --base-url URL      OmniRoute base URL (non-horde models; default from
+                      config image.base_url)
+  --horde-base-url U  AI Horde API base (aihorde/* models; default from
+                      config image.horde_base_url)
   --force             overwrite existing output files
   --json              emit machine-readable JSON
   -h, --help          show this help and exit
@@ -41,15 +52,21 @@ Options:
 Prompt precedence: --prompt wins; otherwise STDIN is read when piped.
 Multiple images are written as NAME-001.png, NAME-002.png, ...
 
-This command uses the OmniRoute API and requires the OMNIROUTE_API_KEY
-environment variable to be set.
+Non-horde models use the OmniRoute API and require OMNIROUTE_API_KEY.
+aihorde/* and horde/* models call AI Horde directly. Set AI_HORDE_API_KEY
+for queue priority (kudos); otherwise the documented anonymous key is used.
+The API key is never printed.
 
-aihorde/* models generate through the Horde queue: requests are queued and
-served when a worker is free, so a run can take minutes. wait_time and
-queue_position from the provider (when reported) are printed after success and
-included in --json output. If no worker picks the job up, OmniRoute reports a
-worker-unavailable error (HTTP 400/503) - that is a queue wait, not a bug in
-your prompt.
+aihorde requests are classified as SFW by default (nsfw=false, censor_nsfw=true
+are sent explicitly). That is request metadata, not a statement about the
+model. A worker that then censors the image fails the run with: "AI Horde
+worker censored the generated image because this request was classified as
+SFW." Use --nsfw to classify the request as NSFW, or --no-censor-nsfw to keep
+SFW classification without asking workers to replace the image.
+
+aihorde jobs run in a queue and can take minutes. wait_time and queue_position
+are printed after success and included in --json output. If no worker picks
+the job up, that is a queue wait, not a bug in your prompt.
 
 Examples:
   bin/image --model MODEL --prompt "A watercolor painting of Ottawa in autumn"
@@ -73,13 +90,21 @@ sub decode_utf8_arg ($s) {
 
 my %opt = (help => 0, json => 0, force => 0);
 
+sub is_horde_model ($model) {
+    return tubular::Adapter::Horde::is_horde_model($model);
+}
+
 my $i = 0;
 while ($i < @ARGV) {
     my $arg = $ARGV[$i++];
     if ($arg eq '-h' || $arg eq '--help') { $opt{help} = 1 }
     elsif ($arg eq '--json') { $opt{json} = 1 }
     elsif ($arg eq '--force') { $opt{force} = 1 }
-    elsif (grep { $arg eq $_ } qw(--model --prompt --output --size --format --quality --negative-prompt --base-url)) {
+    elsif ($arg eq '--nsfw') { $opt{nsfw} = 1 }
+    elsif ($arg eq '--no-nsfw') { $opt{nsfw} = 0 }
+    elsif ($arg eq '--censor-nsfw') { $opt{'censor-nsfw'} = 1 }
+    elsif ($arg eq '--no-censor-nsfw') { $opt{'censor-nsfw'} = 0 }
+    elsif (grep { $arg eq $_ } qw(--model --prompt --output --size --format --quality --negative-prompt --base-url --horde-base-url)) {
         defined $ARGV[$i] or usage_bad("$arg needs a value");
         my $key = $arg =~ s/^--//r;
         $opt{$key} = $ARGV[$i++];
@@ -104,6 +129,15 @@ if ($opt{help}) {
 
 usage_bad("--model is required") unless defined $opt{model} && length $opt{model};
 usage_bad("--model must be a plain string") if ref $opt{model};
+if ((exists $opt{nsfw} || exists $opt{'censor-nsfw'}) && !is_horde_model($opt{model})) {
+    usage_bad("--nsfw and --censor-nsfw are only valid for aihorde/* (or horde/*) models");
+}
+if (defined $opt{'horde-base-url'} && !is_horde_model($opt{model})) {
+    usage_bad("--horde-base-url is only valid for aihorde/* (or horde/*) models");
+}
+if (is_horde_model($opt{model}) && defined $opt{'base-url'}) {
+    usage_bad("--base-url is for OmniRoute models; for aihorde/* use --horde-base-url");
+}
 
 if (defined $opt{size} && (defined $opt{width} || defined $opt{height})) {
     usage_bad("give --size or --width/--height, not both");
@@ -165,7 +199,14 @@ my $config = tubular::Config->new();
 my $cfg = $config->as_hash();
 
 my $base_url = defined $opt{'base-url'} ? $opt{'base-url'} : $cfg->{image}{base_url};
-if ($base_url !~ m{\Ahttps?://}i) {
+my $horde_base_url = defined $opt{'horde-base-url'}
+    ? $opt{'horde-base-url'} : $cfg->{image}{horde_base_url};
+if (is_horde_model($opt{model})) {
+    if (!defined $horde_base_url || $horde_base_url !~ m{\Ahttps?://}i) {
+        usage_bad("invalid Horde base URL '$horde_base_url' (must start with http:// or https://)");
+    }
+}
+elsif ($base_url !~ m{\Ahttps?://}i) {
     usage_bad("invalid base URL '$base_url' (must start with http:// or https://)");
 }
 
@@ -184,12 +225,25 @@ $request->{n} = $opt{n} if defined $opt{n} && $opt{n} >= 1;
 $request->{quality} = $opt{quality} if defined $opt{quality};
 $request->{seed} = $opt{seed} if defined $opt{seed};
 $request->{negative_prompt} = $opt{'negative-prompt'} if defined $opt{'negative-prompt'};
+if (is_horde_model($opt{model})) {
+    my $nsfw = $opt{nsfw} ? 1 : 0;
+    my $censor = defined $opt{'censor-nsfw'} ? ($opt{'censor-nsfw'} ? 1 : 0) : 1;
+    if ($nsfw) {
+        $censor = 0;
+    }
+    $request->{nsfw} = $nsfw;
+    $request->{censor_nsfw} = $censor;
+}
 if (defined $opt{format}) {
     my $of = $opt{format} eq 'jpg' ? 'jpeg' : $opt{format};
     $request->{output_format} = $of;
 }
 
-my $image = tubular::Image->new(base_url => $base_url, timeout => $timeout);
+my $image = tubular::Image->new(
+    base_url       => $base_url,
+    horde_base_url => $horde_base_url,
+    timeout        => $timeout,
+);
 my $res = $image->generate(%$request);
 
 if (!$res->{ok}) {
@@ -204,6 +258,7 @@ if (!$res->{ok}) {
         $err{queued}        = $res->{queued}        if defined $res->{queued};
         $err{wait_time}     = $res->{wait_time}     if defined $res->{wait_time};
         $err{queue_position} = $res->{queue_position} if defined $res->{queue_position};
+        $err{censored}      = $res->{censored}        if defined $res->{censored};
         print JSON::PP->new->utf8->canonical->pretty->encode(\%err);
     }
     else {
@@ -320,7 +375,7 @@ else {
 
 if ($res->{requested_n} > @names) {
     warn 'bin/image: warning: requested ' . $res->{requested_n}
-        . ' images but OmniRoute returned ' . scalar(@names) . "\n";
+        . ' images but the API returned ' . scalar(@names) . "\n";
 }
 
 exit 0;

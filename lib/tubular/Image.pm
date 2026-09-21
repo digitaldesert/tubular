@@ -7,6 +7,7 @@ use HTTP::Tiny ();
 use JSON::PP ();
 use MIME::Base64 ();
 use Scalar::Util qw(looks_like_number reftype);
+use tubular::Adapter::Horde ();
 
 our $VERSION = '0.1';
 
@@ -17,6 +18,8 @@ my $DEFAULT_BASE_URL  = 'http://127.0.0.1:20128/v1';
 my $DEFAULT_TIMEOUT   = 300;              # seconds (300000 ms effective)
 my $DEFAULT_MAX_BYTES = 60_000_000;       # generous cap for base64 images
 my $AGENT             = 'tubular/0.1';
+my $HORDE_SFW_CENSORED_MSG
+    = 'AI Horde worker censored the generated image because this request was classified as SFW.';
 
 my %MIME_EXT = (
     'image/png'  => 'png',
@@ -32,10 +35,14 @@ my %IMAGE_EXT = map { $_ => 1 } keys %MIME_EXT, qw(jpeg);
 
 sub new ($class, %args) {
     my $self = bless {
-        base_url  => defined $args{base_url}  ? $args{base_url}  : $DEFAULT_BASE_URL,
-        timeout   => defined $args{timeout}   ? $args{timeout}   : $DEFAULT_TIMEOUT,
-        max_bytes => defined $args{max_bytes} ? $args{max_bytes} : $DEFAULT_MAX_BYTES,
-        api_key   => $args{api_key},
+        base_url            => defined $args{base_url}  ? $args{base_url}  : $DEFAULT_BASE_URL,
+        horde_base_url      => $args{horde_base_url},
+        timeout             => defined $args{timeout}   ? $args{timeout}   : $DEFAULT_TIMEOUT,
+        max_bytes           => defined $args{max_bytes} ? $args{max_bytes} : $DEFAULT_MAX_BYTES,
+        api_key             => $args{api_key},
+        horde_api_key       => $args{horde_api_key},
+        horde_poll_interval => $args{horde_poll_interval},
+        horde               => $args{horde},
     }, $class;
     return $self;
 }
@@ -62,6 +69,10 @@ sub api_key ($self) {
 #     seed            => 42,                   # optional
 #     output_format   => 'png',                # optional
 #     negative_prompt => '...',                # optional, backend-dependent
+#     nsfw            => 0,                    # optional JSON boolean (aihorde)
+#     censor_nsfw     => 1,                    # optional JSON boolean (aihorde)
+#     trusted_workers => 0,                    # optional JSON boolean (aihorde)
+#     replacement_filter => 1,                 # optional JSON boolean (aihorde)
 #   }
 #
 # Returns { ok => 1, model, base_url, requested_n, images => [ ... ] } where
@@ -83,6 +94,17 @@ sub generate ($self, %req) {
     }
     if ($prompt eq '') {
         return { ok => 0, error => 'prompt must not be empty' };
+    }
+
+    if (tubular::Adapter::Horde::is_horde_model($model)) {
+        my $horde = $self->{horde} // tubular::Adapter::Horde->new(
+            base_url      => $self->{horde_base_url},
+            timeout       => $self->{timeout},
+            max_bytes     => $self->{max_bytes},
+            api_key       => $self->{horde_api_key},
+            poll_interval => $self->{horde_poll_interval},
+        );
+        return $horde->generate(%req);
     }
 
     my $key = $self->api_key;
@@ -112,6 +134,9 @@ sub generate ($self, %req) {
     }
 
     my $json = JSON::PP->new->utf8->canonical->encode(\%body);
+    if ($ENV{TUBULAR_DEBUG_IMAGE}) {
+        warn "tubular::Image OmniRoute request: $json\n";
+    }
     my $ua = HTTP::Tiny->new(
         timeout    => $self->{timeout} || $DEFAULT_TIMEOUT,
         max_size   => $self->{max_bytes} || $DEFAULT_MAX_BYTES,
@@ -159,6 +184,9 @@ sub generate ($self, %req) {
         my $msg    = $emsg;
         if (defined $msg) {
             $msg .= _worker_hint($msg);
+            if (_is_horde_censored_msg($msg)) {
+                $result->{censored} = 1;
+            }
         }
         else {
             $msg = $resp->{reason} // 'request failed';
@@ -203,6 +231,13 @@ sub generate ($self, %req) {
     my @images;
     for my $i (0 .. $#$data) {
         my $item = $data->[$i];
+        if (_item_censored($item)) {
+            $result->{error} = $HORDE_SFW_CENSORED_MSG;
+            $result->{error_code} = 'content_filter';
+            $result->{error_type} = 'content_filter';
+            $result->{censored} = 1;
+            return $result;
+        }
         my $img = $self->_materialize($item, $i);
         if (!$img->{ok}) {
             $result->{error} = 'image response item ' . ($i + 1) . ": $img->{error}";
@@ -344,6 +379,16 @@ sub _ext_from_url ($url) {
     return $IMAGE_EXT{$ext} ? $ext : undef;
 }
 
+sub _item_censored ($item) {
+    return 0 unless ref $item eq 'HASH';
+    return $item->{censored} ? 1 : 0;
+}
+
+sub _is_horde_censored_msg ($msg) {
+    return 0 unless defined $msg;
+    return index($msg, $HORDE_SFW_CENSORED_MSG) >= 0 ? 1 : 0;
+}
+
 # OpenAI-compatible endpoint errors come back as { error: { message, code, type } }.
 # Returns (message, code, type), each undef when absent.
 sub _api_error ($content) {
@@ -419,8 +464,9 @@ tubular::Image - image generation through the OmniRoute API
 
     my $config = tubular::Config->new();
     my $image = tubular::Image->new(
-        base_url => $config->get('image', 'base_url'),
-        timeout  => $config->get('image', 'timeout'),
+        base_url       => $config->get('image', 'base_url'),
+        horde_base_url => $config->get('image', 'horde_base_url'),
+        timeout        => $config->get('image', 'timeout'),
     );
 
     my $res = $image->generate(
@@ -433,19 +479,23 @@ tubular::Image - image generation through the OmniRoute API
 
 =head1 DESCRIPTION
 
-A thin, deterministic client for OmniRoute's OpenAI-compatible image
-generation endpoint (C<POST /images/generations>). Uses only C<HTTP::Tiny>
-for every HTTP exchange and C<JSON::PP> for JSON.
+A thin, deterministic client for image generation. C<aihorde/*> and
+C<horde/*> models go through L<tubular::Adapter::Horde> (native AI Horde
+async API). Every other model is sent to OmniRoute's OpenAI-compatible
+C<POST /images/generations> endpoint.
 
-The API key is read from the C<OMNIROUTE_API_KEY> environment variable and is
-never hard-coded, logged or echoed. If the variable is missing the caller
-gets a clear error.
+The OmniRoute API key is read from the C<OMNIROUTE_API_KEY> environment
+variable and is never hard-coded, logged or echoed. Horde uses
+C<AI_HORDE_API_KEY> when set, otherwise the documented anonymous key.
 
 Request fields are sent only when supplied: C<model> and C<prompt> are
 required; C<n>, C<size>, C<quality>, C<seed>, C<output_format> and
-C<negative_prompt> are optional and forwarded verbatim (the endpoint is an
-OpenAI-compatible router, so a field a particular model does not accept is
-rejected by the API itself).
+C<negative_prompt> are optional. For Horde models, C<nsfw>,
+C<censor_nsfw>, C<trusted_workers> and C<replacement_filter> are optional
+booleans mapped onto the native Horde payload. When omitted, the adapter
+classifies the job as SFW (C<nsfw:false>, C<censor_nsfw:true>, sent
+explicitly). A Horde worker that then censors the image is reported as a
+failure rather than a successful generation.
 
 Response handling:
 
@@ -466,18 +516,19 @@ download), the whole request fails rather than returning partial output.
 
 =head2 Queues and wait times
 
-C<aihorde/*> providers generate through the AI Horde queue. When the response
-carries queue state - C<wait_time>, C<queue_position>, or a
-C<queue: { wait_time, position }> object - it is surfaced on the result as
-C<wait_time> and C<queue_position> so callers can report how long a queued
-generation is expected to take. If a 2xx response is queued but contains no
-image data yet, C<generate> fails with a distinct C<queued> flag (and the
-estimated C<wait_time>/C<queue_position>) instead of a vague "no image data"
-error.
+C<aihorde/*> and C<horde/*> models generate through the AI Horde queue via
+L<tubular::Adapter::Horde>, not OmniRoute. Queue state (C<wait_time>,
+C<queue_position>) from Horde check/status responses is surfaced on the
+result. If no worker can fulfill the job, C<generate> fails with a
+worker-unavailable error and a hint that this is a queue wait.
 
-When no Horde worker picks a job up the router reports a worker-unavailable
-error (HTTP 400/503 with a message about Horde workers). Such errors carry the
-structured C<error_code>/C<error_type> fields from the API payload and the
-message includes a hint that this is a queue wait, not an argument error.
+If a worker censors the result because the request was classified as SFW
+(Horde C<nsfw:false> plus C<censor_nsfw:true>), C<generate> fails with
+C<censored> set and the message
+"AI Horde worker censored the generated image because this request was
+classified as SFW." instead of writing the black placeholder image.
+
+When using OmniRoute, if a 2xx response is queued but contains no image
+data yet, C<generate> fails with a distinct C<queued> flag.
 
 =cut

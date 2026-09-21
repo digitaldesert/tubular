@@ -4,5 +4,6 @@ use Test::More;
 
 use_ok('tubular::Config');
 use_ok('tubular::Sequence');
+use_ok('tubular::Adapter::Horde');
 
 done_testing;

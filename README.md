@@ -183,13 +183,14 @@ Failures exit with a non-zero status.
 
 ## Image generation
 
-`bin/image` generates images through the **OmniRoute** API, which exposes an
-OpenAI-compatible image generation endpoint
-(`POST /v1/images/generations`). The API key must be available in the
-`OMNIROUTE_API_KEY` environment variable; it is never hard-coded or printed.
+`bin/image` generates images two ways:
 
-Image models are referenced in OmniRoute's `provider/model` form, for
-example `aihorde/Flux.1-Schnell fp8 (Compact)`:
+- `aihorde/*` and `horde/*` models call the **AI Horde** native async API
+  (`POST /api/v2/generate/async`) through `tubular::Adapter::Horde`. Set
+  `AI_HORDE_API_KEY` for queue priority; otherwise Horde's documented
+  anonymous key is used. Keys are never printed.
+- Every other model goes through the **OmniRoute** OpenAI-compatible
+  endpoint (`POST /v1/images/generations`) and requires `OMNIROUTE_API_KEY`.
 
 ```
 bin/image \
@@ -212,6 +213,11 @@ Useful options: `--output FILE` (default `image-YYYYMMDD-HHMMSS.png`),
 png|jpg|jpeg|webp`, `--quality low|medium|high`, `--negative-prompt TEXT`,
 `--seed N`, `--timeout N` (seconds, default configurable via `image.timeout`,
 300 s = 300000 ms effective) and `--force` to overwrite existing files.
+For `aihorde/*` models, `--nsfw` / `--no-nsfw` and `--censor-nsfw` /
+`--no-censor-nsfw` control Horde request classification (default SFW:
+`nsfw=false`, `censor_nsfw=true`, sent explicitly). OmniRoute is not in
+that path; `--base-url` is OmniRoute-only, `--horde-base-url` points at
+the Horde API (default from config `image.horde_base_url`).
 
 ### Queues, wait times and providers
 
@@ -219,16 +225,15 @@ png|jpg|jpeg|webp`, `--quality low|medium|high`, `--negative-prompt TEXT`,
 and served when a worker is free, so a request can take minutes (raise
 `--timeout` accordingly). `bin/image` is queue-aware:
 
-- when the provider reports a wait time or queue position (top-level
-  `wait_time` / `queue_position`, or `queue: { wait_time, position }`), the
-  values are printed after a successful generation and included in `--json`
-  output as `wait_time` and `queue_position`;
-- if a response comes back queued but without image data, `bin/image` fails
-  with an explicit "still queued" error instead of a bare "no image data";
-- if no worker picks the job up, OmniRoute returns a worker-unavailable error
-  (`HTTP 400` `invalid_request_error` or `HTTP 503` `service_unavailable`);
-  `bin/image` explains that this is a queue wait (retry in a bit) and, in
-  `--json` mode, also surfaces the structured `error_code`/`error_type`.
+- when Horde reports a wait time or queue position, the values are printed
+  after a successful generation and included in `--json` output as
+  `wait_time` and `queue_position`;
+- if no worker can fulfill the job, `bin/image` fails with a
+  worker-unavailable error and a hint that this is a queue wait;
+- if a worker censors the result because the request was classified as SFW,
+  `bin/image` fails instead of writing the black placeholder image, with:
+  "AI Horde worker censored the generated image because this request was
+  classified as SFW."
 
 Use `--json` for machine-readable output; it reports `ok`, `model`, `prompt`,
 `base_url`, `requested_n`, per-image `file`/`bytes`/`ext`/`source`/`url`, and
@@ -239,7 +244,8 @@ carrying either base64 image data or an image URL are both handled. See
 generation in the offline test suite.
 
 The OmniRoute base URL and timeout come from config `image.base_url` and
-`image.timeout` (defaults `http://127.0.0.1:20128/v1` and 300).
+`image.timeout` (defaults `http://127.0.0.1:20128/v1` and 300). The Horde
+API base is `image.horde_base_url` (default `https://aihorde.net/api`).
 
 ## Testing
 

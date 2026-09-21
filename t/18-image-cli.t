@@ -98,6 +98,51 @@ my $handler = sub ($head, $body) {
     if ($line =~ m{^GET /raw\.png HTTP/1\.1}) {
         return { status => 200, body => $png, 'content-type' => 'image/png' };
     }
+    if ($line =~ m{^(GET|DELETE) /(?:api/)?v2/generate/(check|status)/([^\s?]+) HTTP/1\.[01]}) {
+        my ($method, $kind, $id) = ($1, $2, $3);
+        if ($method eq 'DELETE') {
+            return { status => 200, body => '{}' };
+        }
+        if ($kind eq 'check') {
+            if ($id eq 'job-noworker') {
+                return { status => 200, body => '{"done":false,"is_possible":false,"wait_time":0,"queue_position":0}' };
+            }
+            return { status => 200, body => '{"done":true,"wait_time":12,"queue_position":1,"is_possible":true}' };
+        }
+        if ($id eq 'job-censored') {
+            return { status => 200, body => '{"generations":[{"img":"http://127.0.0.1:'
+                . $S{port} . '/raw.png","censored":true}]}' };
+        }
+        if ($id =~ /^job-ok(?:-(\d+))?\z/) {
+            my $n = defined $1 ? 0 + $1 : 1;
+            $n = 1 if $n < 1;
+            my $gen = '{"img":"http://127.0.0.1:' . $S{port} . '/raw.png"}';
+            my $gens = join(',', ($gen) x $n);
+            return { status => 200, body => '{"wait_time":12,"queue_position":1,"generations":[' . $gens . ']}' };
+        }
+        return { status => 200, body => '{"generations":[{"img":"http://127.0.0.1:'
+            . $S{port} . '/raw.png"}]}' };
+    }
+    if ($line =~ m{^POST /(?:api/)?v2/generate/async HTTP/1\.[01]}) {
+        my $j = eval { JSON::PP::decode_json($body) };
+        my $model = '';
+        if ($j && ref $j eq 'HASH' && ref $j->{models} eq 'ARRAY' && @{$j->{models}}) {
+            $model = $j->{models}[0] // '';
+        }
+        return { status => 400, body => '{"message":"Invalid Horde model"}' }
+            if $model =~ /Bad/i;
+        my $id = 'job-ok';
+        $id = 'job-censored' if $model =~ /Censored/i;
+        $id = 'job-noworker' if $model =~ /NoWorker/i;
+        if ($id eq 'job-ok') {
+            my $n = 1;
+            $n = 0 + $j->{params}{n}
+                if $j && ref $j eq 'HASH' && ref $j->{params} eq 'HASH'
+                && defined $j->{params}{n} && $j->{params}{n} =~ /^\d+$/;
+            $id = "job-ok-$n";
+        }
+        return { status => 200, body => '{"id":"' . $id . '"}' };
+    }
     if ($line =~ m{^POST /v1/images/generations HTTP/1\.1}) {
         my $j = eval { JSON::PP::decode_json($body) };
         my $model = $j && ref $j eq 'HASH' && defined $j->{model} ? $j->{model} : '';
@@ -121,6 +166,12 @@ my $handler = sub ($head, $body) {
         if ($model eq 'mock/err503') {
             return { status => 503, body => '{"error":{"type":"service_unavailable","message":"No Horde workers can currently fulfill this request","code":"service_unavailable"}}' };
         }
+        if ($model eq 'mock/censored') {
+            return { status => 200, body => '{"data":[{"b64_json":"' . $png64 . '","censored":true}]}' };
+        }
+        if ($model eq 'mock/censorerr') {
+            return { status => 400, body => '{"error":{"type":"content_filter","code":"content_filter","message":"AI Horde worker censored the generated image because this request was classified as SFW."}}' };
+        }
         return { status => 200, body => '{"data":[{"b64_json":"' . $png64 . '"}]}' };
     }
     return { status => 404, body => 'unknown route', 'content-type' => 'text/plain' };
@@ -130,6 +181,7 @@ my ($spid, $sport) = start_server($handler, $S{log});
 $S{spid} = $spid;
 
 sub base { "http://127.0.0.1:$sport/v1" }
+sub horde { "http://127.0.0.1:$sport/api" }
 
 sub reqs {
     return [] unless -e $S{log};
@@ -143,16 +195,24 @@ sub reqs {
     return \@out;
 }
 
-sub last_body {
+sub last_post {
     my $r = reqs();
-    return undef unless @$r;
-    return $r->[-1]{body};
+    for my $item (reverse @$r) {
+        return $item if defined $item->{head} && $item->{head} =~ m{^POST };
+    }
+    return undef;
+}
+
+sub last_post_json {
+    my $item = last_post() or return undef;
+    return eval { JSON::PP::decode_json($item->{body} // '') };
 }
 
 local %ENV = %ENV;
-delete @ENV{qw(TUBULAR_CONFIG)};
+delete @ENV{qw(TUBULAR_CONFIG AI_HORDE_API_KEY)};
 $ENV{TUBULAR_HOME} = tempdir(CLEANUP => 1);
 $ENV{PATH} = tempdir(CLEANUP => 1);
+$ENV{TUBULAR_HORDE_POLL_INTERVAL} = 0;
 local $ENV{OMNIROUTE_API_KEY} = 'sk-cli-test';
 
 subtest '--help' => sub {
@@ -161,7 +221,13 @@ subtest '--help' => sub {
     like($o, qr/Usage:/, 'usage shown');
     like($o, qr/OmniRoute/, 'mentions OmniRoute');
     like($o, qr/OMNIROUTE_API_KEY/, 'mentions the API key variable');
+    like($o, qr/AI Horde/, 'mentions AI Horde');
+    like($o, qr/AI_HORDE_API_KEY/, 'mentions the Horde key variable');
+    like($o, qr/--horde-base-url/, 'documents --horde-base-url');
     like($o, qr/STDIN/, 'documents STDIN prompt');
+    like($o, qr/--nsfw/, 'documents --nsfw');
+    like($o, qr/--no-censor-nsfw/, 'documents --no-censor-nsfw');
+    like($o, qr/classified as SFW/, 'documents SFW censor diagnostic');
 };
 
 subtest 'required arguments' => sub {
@@ -209,7 +275,7 @@ subtest 'generation from a --prompt argument' => sub {
     my $out = File::Spec->catfile($dir, 'arg.png');
     my ($o, $e, $code) = run($binimage,
         '--model', 'aihorde/Test', '--prompt', 'a red car beside a lake',
-        '--output', $out, '--base-url', base());
+        '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
     like($o, qr/Generated image:/, 'success header');
     like($o, qr/Model:  aihorde\/Test/, 'model echoed');
@@ -225,10 +291,10 @@ subtest 'prompt from STDIN' => sub {
     my $dir = tempdir(CLEANUP => 1);
     my $out = File::Spec->catfile($dir, 'stdin.png');
     my ($o, $e, $code) = run_stdin("futuristic city at night\n",
-        $binimage, '--model', 'aihorde/Test', '--output', $out, '--base-url', base());
+        $binimage, '--model', 'aihorde/Test', '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
     like($o, qr/Generated image:/, 'success');
-    my $body = eval { JSON::PP::decode_json(last_body()) };
+    my $body = last_post_json();
     is($body->{prompt}, "futuristic city at night\n", 'stdin prompt used verbatim');
 };
 
@@ -237,9 +303,9 @@ subtest '--prompt wins over STDIN' => sub {
     my $out = File::Spec->catfile($dir, 'prec.png');
     my ($o, $e, $code) = run_stdin("stdin prompt",
         $binimage, '--model', 'aihorde/Test', '--prompt', 'argument prompt',
-        '--output', $out, '--base-url', base());
+        '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
-    my $body = eval { JSON::PP::decode_json(last_body()) };
+    my $body = last_post_json();
     is($body->{prompt}, 'argument prompt', '--prompt wins');
 };
 
@@ -249,9 +315,9 @@ subtest 'prompt preserves unicode and newlines via STDIN' => sub {
     my $want = "A caf\x{e9} at night\n\x{591c}\x{666f} scene";
     utf8::encode(my $bytes = $want);
     my ($o, $e, $code) = run_stdin($bytes,
-        $binimage, '--model', 'aihorde/Test', '--output', $out, '--base-url', base());
+        $binimage, '--model', 'aihorde/Test', '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
-    my $body = eval { JSON::PP::decode_json(last_body()) };
+    my $body = last_post_json();
     is($body->{prompt}, $want, 'unicode + multiline prompt preserved');
 };
 
@@ -260,15 +326,26 @@ subtest 'request construction (model, n, size, auth)' => sub {
     my $out = File::Spec->catfile($dir, 'req.png');
     my ($o, $e, $code) = run($binimage,
         '--model', 'aihorde/Test', '--prompt', 'x', '--n', '2', '--size', '512x512',
-        '--output', $out, '--base-url', base());
+        '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
-    my $r = reqs();
-    my $j = eval { JSON::PP::decode_json($r->[-1]{body}) };
-    is($j->{model}, 'aihorde/Test', 'model in request');
-    is($j->{n}, 2, 'n in request');
-    is($j->{size}, '512x512', 'size in request');
-    like($r->[-1]{head}, qr{^POST /v1/images/generations HTTP/1\.1}, 'endpoint');
-    like($r->[-1]{head}, qr/Authorization: Bearer sk-cli-test/i, 'API key header');
+    my $item = last_post();
+    my $j = eval { JSON::PP::decode_json($item->{body}) };
+    is_deeply($j->{models}, ['Test'], 'Horde model prefix stripped');
+    is($j->{params}{n}, 2, 'n in params');
+    is($j->{params}{width}, 512, 'width in params');
+    is($j->{params}{height}, 512, 'height in params');
+    like($item->{head}, qr{^POST /api/v2/generate/async HTTP/1\.1}, 'Horde async endpoint');
+    like($item->{head}, qr/apikey:\s*0000000000/i, 'anonymous Horde key');
+    like($item->{head}, qr/Client-Agent:\s*tubular:0\.1:local/i, 'Client-Agent');
+    unlike($item->{head}, qr/Authorization:\s*Bearer/i, 'no OmniRoute bearer');
+    ok(JSON::PP::is_bool($j->{nsfw}), 'nsfw json bool');
+    ok(!$j->{nsfw}, 'default nsfw false');
+    ok(JSON::PP::is_bool($j->{censor_nsfw}), 'censor_nsfw json bool');
+    ok($j->{censor_nsfw}, 'default censor_nsfw true');
+    ok(JSON::PP::is_bool($j->{trusted_workers}), 'trusted_workers json bool');
+    ok(!$j->{trusted_workers}, 'default trusted_workers false');
+    ok(JSON::PP::is_bool($j->{replacement_filter}), 'replacement_filter json bool');
+    ok($j->{replacement_filter}, 'default replacement_filter true');
 };
 
 subtest 'width/height normalize to size' => sub {
@@ -276,10 +353,11 @@ subtest 'width/height normalize to size' => sub {
     my $out = File::Spec->catfile($dir, 'wh.png');
     my ($o, $e, $code) = run($binimage,
         '--model', 'aihorde/Test', '--prompt', 'x',
-        '--width', '1024', '--height', '768', '--output', $out, '--base-url', base());
+        '--width', '1024', '--height', '768', '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
-    my $j = eval { JSON::PP::decode_json(last_body()) };
-    is($j->{size}, '1024x768', 'size normalized from width/height');
+    my $j = last_post_json();
+    is($j->{params}{width}, 1024, 'width from --width');
+    is($j->{params}{height}, 768, 'height from --height');
 };
 
 subtest 'format overrides extension and sent as output_format' => sub {
@@ -287,11 +365,11 @@ subtest 'format overrides extension and sent as output_format' => sub {
     my $out = File::Spec->catfile($dir, 'img');
     my ($o, $e, $code) = run($binimage,
         '--model', 'aihorde/Test', '--prompt', 'x', '--format', 'jpg',
-        '--output', $out, '--base-url', base());
+        '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
     ok(-e "$dir/img.jpg", 'jpg extension used');
-    my $j = eval { JSON::PP::decode_json(last_body()) };
-    is($j->{output_format}, 'jpeg', 'output_format sent as jpeg');
+    my $j = last_post_json();
+    ok(!exists $j->{output_format}, 'Horde payload has no output_format');
 };
 
 subtest 'default output naming' => sub {
@@ -299,7 +377,7 @@ subtest 'default output naming' => sub {
     my $old = Cwd::cwd();
     chdir $wd or die "chdir: $!";
     my ($o, $e, $code) = run($binimage,
-        '--model', 'aihorde/Test', '--prompt', 'x', '--base-url', base());
+        '--model', 'aihorde/Test', '--prompt', 'x', '--horde-base-url', horde());
     chdir $old or die "chdir back: $!";
     is($code, 0, 'exit 0');
     my @files = grep { basename($_) =~ /^image-\d{8}-\d{6}\.png$/ }
@@ -330,7 +408,7 @@ subtest 'fewer images than requested is warned' => sub {
         '--model', 'mock/many', '--prompt', 'x', '--n', '3',
         '--output', File::Spec->catfile($dir, 's.png'), '--base-url', base());
     is($code, 0, 'still exits 0');
-    like($e, qr/requested 3 images but OmniRoute returned 2/, 'warning on stderr');
+    like($e, qr/requested 3 images but the API returned 2/, 'warning on stderr');
 };
 
 subtest 'URL image response is downloaded' => sub {
@@ -353,7 +431,7 @@ subtest 'refuses to overwrite unless --force' => sub {
     print {$fh} 'STALE';
     close $fh;
     my ($o, $e, $code) = run($binimage,
-        '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--base-url', base());
+        '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--horde-base-url', horde());
     is($code, 1, 'refused exits 1');
     like($e, qr/--force/, 'suggests --force');
     open my $rfh, '<', $out or die $!;
@@ -363,7 +441,7 @@ subtest 'refuses to overwrite unless --force' => sub {
 
     ($o, $e, $code) = run($binimage,
         '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out,
-        '--force', '--base-url', base());
+        '--force', '--horde-base-url', horde());
     is($code, 0, 'force succeeds');
     open my $ffh, '<:raw', $out or die $!;
     local $/;
@@ -433,13 +511,13 @@ subtest 'worker-unavailable error is explained' => sub {
     like($j->{error}, qr/run in a queue/, 'hint in JSON error');
 };
 
-subtest 'missing OMNIROUTE_API_KEY exits 1' => sub {
+subtest 'missing OMNIROUTE_API_KEY exits 1 for OmniRoute models' => sub {
     local $ENV{OMNIROUTE_API_KEY};
     delete $ENV{OMNIROUTE_API_KEY};
     my $dir = tempdir(CLEANUP => 1);
     my $out = File::Spec->catfile($dir, 'x.png');
     my ($o, $e, $code) = run($binimage,
-        '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--base-url', base());
+        '--model', 'mock/b64', '--prompt', 'x', '--output', $out, '--base-url', base());
     is($code, 1, 'exit 1');
     like($e, qr/OMNIROUTE_API_KEY is not set/, 'actionable error');
 };
@@ -457,7 +535,7 @@ subtest '--json success' => sub {
     my $dir = tempdir(CLEANUP => 1);
     my $out = File::Spec->catfile($dir, 'j.png');
     my ($o, $e, $code) = run($binimage,
-        '--json', '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--base-url', base());
+        '--json', '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
     my $j = eval { JSON::PP::decode_json($o) };
     ok($j, 'valid JSON');
@@ -485,9 +563,112 @@ subtest 'dispatches through bin/tubular' => sub {
     my $dir = tempdir(CLEANUP => 1);
     my $out = File::Spec->catfile($dir, 'd.png');
     my ($o, $e, $code) = run($tubular, 'image',
-        '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--base-url', base());
+        '--model', 'aihorde/Test', '--prompt', 'x', '--output', $out, '--horde-base-url', horde());
     is($code, 0, 'exit 0');
     ok(-e $out, 'file written through dispatcher');
+};
+
+subtest '--base-url is rejected for horde models' => sub {
+    my (undef, $e, $code) = run($binimage,
+        '--model', 'aihorde/Test', '--prompt', 'x', '--base-url', base());
+    is($code, 2, 'exit 2');
+    like($e, qr/--base-url is for OmniRoute/, 'diagnostic');
+};
+
+subtest '--horde-base-url is rejected for non-horde models' => sub {
+    my (undef, $e, $code) = run($binimage,
+        '--model', 'mock/b64', '--prompt', 'x', '--horde-base-url', horde());
+    is($code, 2, 'exit 2');
+    like($e, qr/--horde-base-url is only valid/, 'diagnostic');
+};
+
+subtest '--nsfw classifies the Horde request as NSFW' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'nsfw.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'aihorde/Test', '--prompt', 'x', '--nsfw',
+        '--output', $out, '--horde-base-url', horde());
+    is($code, 0, 'exit 0');
+    my $j = last_post_json();
+    ok($j->{nsfw}, 'nsfw true');
+    ok(!$j->{censor_nsfw}, 'censor_nsfw forced false');
+};
+
+subtest '--no-censor-nsfw keeps SFW classification without placeholder censoring' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'nocensor.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'aihorde/Test', '--prompt', 'x', '--no-censor-nsfw',
+        '--output', $out, '--horde-base-url', horde());
+    is($code, 0, 'exit 0');
+    my $j = last_post_json();
+    ok(!$j->{nsfw}, 'still SFW');
+    ok(!$j->{censor_nsfw}, 'censor_nsfw false');
+};
+
+subtest 'non-horde models do not send Horde classification fields' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'openai.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'mock/b64', '--prompt', 'x',
+        '--output', $out, '--base-url', base());
+    is($code, 0, 'exit 0');
+    my $j = last_post_json();
+    ok(!exists $j->{nsfw}, 'nsfw omitted');
+    ok(!exists $j->{censor_nsfw}, 'censor_nsfw omitted');
+};
+
+subtest '--nsfw rejected for non-horde models' => sub {
+    my (undef, $e, $code) = run($binimage,
+        '--model', 'mock/b64', '--prompt', 'x', '--nsfw');
+    is($code, 2, 'exit 2');
+    like($e, qr/only valid for aihorde/, 'diagnostic');
+};
+
+subtest 'censored placeholder is not written as a successful image' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'blocked.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'mock/censored', '--prompt', 'x',
+        '--output', $out, '--base-url', base());
+    is($code, 1, 'exit 1');
+    like($e, qr/AI Horde worker censored the generated image because this request was classified as SFW/, 'diagnostic');
+    ok(!-e $out, 'placeholder not written');
+};
+
+subtest 'native Horde censored generation is not written' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'blocked.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'aihorde/Censored', '--prompt', 'x',
+        '--output', $out, '--horde-base-url', horde());
+    is($code, 1, 'exit 1');
+    like($e, qr/AI Horde worker censored the generated image because this request was classified as SFW/, 'diagnostic');
+    ok(!-e $out, 'placeholder not written');
+};
+
+subtest 'native Horde worker-unavailable is explained' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'x.png');
+    my ($o, $e, $code) = run($binimage,
+        '--model', 'aihorde/NoWorker', '--prompt', 'x',
+        '--output', $out, '--horde-base-url', horde());
+    is($code, 1, 'exit 1');
+    like($e, qr/no worker picked/i, 'queue hint');
+};
+
+subtest '--json reports censored OmniRoute errors' => sub {
+    my $dir = tempdir(CLEANUP => 1);
+    my $out = File::Spec->catfile($dir, 'cerr.png');
+    my ($o, $e, $code) = run($binimage,
+        '--json', '--model', 'mock/censorerr', '--prompt', 'x',
+        '--output', $out, '--base-url', base());
+    is($code, 1, 'exit 1');
+    my $j = eval { JSON::PP::decode_json($o) };
+    ok($j, 'valid JSON');
+    is($j->{ok}, 0, 'ok false');
+    ok($j->{censored}, 'censored flag');
+    like($j->{error}, qr/classified as SFW/, 'message');
 };
 
 done_testing;

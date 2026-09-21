@@ -116,6 +116,10 @@ my $handler = sub ($head, $body) {
             if $model eq 'mock/err503';
         return { status => 200, body => '{"created":1,"wait_time":12,"queue_position":1,"data":[{"b64_json":"' . $png64 . '"}]}' }
             if $model eq 'mock/successqueue';
+        return { status => 200, body => '{"data":[{"b64_json":"' . $png64 . '","censored":true}]}' }
+            if $model eq 'mock/censored';
+        return { status => 400, body => '{"error":{"type":"content_filter","code":"content_filter","message":"AI Horde worker censored the generated image because this request was classified as SFW."}}' }
+            if $model eq 'mock/censorerr';
         return { status => 200, body => '{"data":[{"b64_json":"!!!"}]}' }
             if $model eq 'mock/badb64';
         return { status => 200, body => 'not json at all' }
@@ -360,7 +364,7 @@ subtest 'extra fields are omitted when not supplied' => sub {
     my $res = $img->generate(model => 'mock/b64', prompt => 'x');
     ok($res->{ok}, 'ok');
     my $body = $res->{ok} && JSON::PP::decode_json(last_req_body());
-    for my $absent (qw(size quality seed output_format negative_prompt n)) {
+    for my $absent (qw(size quality seed output_format negative_prompt n nsfw censor_nsfw trusted_workers replacement_filter)) {
         ok(!exists $body->{$absent}, "$absent not sent when absent") if $body;
     }
 };
@@ -388,6 +392,23 @@ subtest 'n must be a positive integer' => sub {
     like($res->{error}, qr/positive integer/, 'error');
     $res = $img->generate(model => 'mock/b64', prompt => 'x', n => 'two');
     ok(!$res->{ok}, 'non numeric rejected');
+};
+
+subtest 'censored data item is not treated as success' => sub {
+    my $img = tubular::Image->new(base_url => base());
+    my $res = $img->generate(model => 'mock/censored', prompt => 'x');
+    ok(!$res->{ok}, 'not ok');
+    ok($res->{censored}, 'censored flag');
+    is($res->{error_code}, 'content_filter', 'error code');
+    like($res->{error}, qr/classified as SFW/, 'diagnostic');
+};
+
+subtest 'OmniRoute censor error is surfaced' => sub {
+    my $img = tubular::Image->new(base_url => base());
+    my $res = $img->generate(model => 'mock/censorerr', prompt => 'x');
+    ok(!$res->{ok}, 'not ok');
+    ok($res->{censored}, 'censored flag from API message');
+    like($res->{error}, qr/classified as SFW/, 'diagnostic');
 };
 
 done_testing;

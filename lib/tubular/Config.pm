@@ -26,8 +26,9 @@ my %BUILTIN_DEFAULTS = (
         max_bytes => 21_474_836_480,    # 20 GiB, model downloads
     },
     image => {
-        base_url => 'http://127.0.0.1:20128/v1',    # OmniRoute OpenAI-compatible base
-        timeout  => 300,                             # seconds (300000 ms effective)
+        base_url       => 'http://127.0.0.1:20128/v1',    # OmniRoute OpenAI-compatible base
+        horde_base_url => 'https://aihorde.net/api',      # native AI Horde API
+        timeout        => 300,                             # seconds (300000 ms effective)
     },
     forecast => {
         runner            => 'zsfm',
@@ -135,6 +136,8 @@ sub _validate_basic ($self, $data) {
         $self->_check_num(\@bad, 'image.timeout', $data->{image}{timeout});
         push @bad, 'image.base_url must be a plain string'
             if defined $data->{image}{base_url} && ref $data->{image}{base_url};
+        push @bad, 'image.horde_base_url must be a plain string'
+            if defined $data->{image}{horde_base_url} && ref $data->{image}{horde_base_url};
     }
     if (ref $data->{forecast} eq 'HASH') {
         for my $k (qw(horizon top backtest_windows timeout)) {
